@@ -239,6 +239,84 @@ fn test_expired_hospital_credential_disables_membership() {
     assert_eq!(result, Err(Ok(ContractError::CredentialExpired)));
 }
 
+/// Build a fully-populated [`HospitalConfig`] exercising every field.
+fn sample_config(env: &Env) -> HospitalConfig {
+    let mut departments: Vec<Department> = Vec::new(env);
+    departments.push_back(Department {
+        name: String::from_str(env, "Emergency"),
+        head: String::from_str(env, "Dr. Smith"),
+        contact: String::from_str(env, "er@rmc.org"),
+    });
+
+    let mut locations: Vec<Location> = Vec::new(env);
+    locations.push_back(Location {
+        name: String::from_str(env, "Main Campus"),
+        address: String::from_str(env, "789 Pine Rd"),
+        metadata: String::from_str(env, "24/7"),
+    });
+
+    let mut equipment: Vec<EquipmentResource> = Vec::new(env);
+    equipment.push_back(EquipmentResource {
+        name: String::from_str(env, "MRI"),
+        quantity: 2,
+        status: String::from_str(env, "operational"),
+        metadata: String::from_str(env, "Siemens Aera"),
+    });
+
+    let mut policies: Vec<PolicyProcedure> = Vec::new(env);
+    policies.push_back(PolicyProcedure {
+        title: String::from_str(env, "Infection Control"),
+        version: String::from_str(env, "v3"),
+        details: String::from_str(env, "Hand hygiene and PPE policy"),
+    });
+
+    let mut channels: Vec<String> = Vec::new(env);
+    channels.push_back(String::from_str(env, "sms"));
+    channels.push_back(String::from_str(env, "email"));
+
+    let mut alerts: Vec<AlertSetting> = Vec::new(env);
+    alerts.push_back(AlertSetting {
+        alert_type: String::from_str(env, "code_blue"),
+        enabled: true,
+        channels,
+        escalation_contact: String::from_str(env, "+1-555-0100"),
+    });
+
+    let mut insurance_providers: Vec<InsuranceProviderConfig> = Vec::new(env);
+    let mut plan_codes: Vec<String> = Vec::new(env);
+    plan_codes.push_back(String::from_str(env, "HMO-101"));
+    plan_codes.push_back(String::from_str(env, "PPO-202"));
+    insurance_providers.push_back(InsuranceProviderConfig {
+        provider_name: String::from_str(env, "Acme Health"),
+        plan_codes,
+        billing_contact: String::from_str(env, "billing@acmehealth.com"),
+        metadata: String::from_str(env, "EDI enabled"),
+    });
+
+    let mut emergency_protocols: Vec<EmergencyProtocol> = Vec::new(env);
+    emergency_protocols.push_back(EmergencyProtocol {
+        protocol_name: String::from_str(env, "Fire"),
+        description: String::from_str(env, "Evacuate wing A"),
+        last_updated: 1_700_000_000,
+        contact: String::from_str(env, "safety@rmc.org"),
+    });
+
+    HospitalConfig {
+        departments,
+        locations,
+        equipment,
+        policies,
+        alerts,
+        insurance_providers,
+        billing: BillingConfig {
+            currency: String::from_str(env, "USD"),
+            payment_terms: String::from_str(env, "Net 30"),
+            tax_id: String::from_str(env, "TAX-001"),
+        },
+        emergency_protocols,
+    }
+}
+
 #[test]
 fn test_hospital_config_flow() {
     let env = Env::default();
@@ -250,61 +328,80 @@ fn test_hospital_config_flow() {
 
     register_hospital_with_anchor(&env, &client, &hospital_wallet);
 
+    let config = sample_config(&env);
+    // The hospital owner may write its own config.
+    client.set_hospital_config(&hospital_wallet, &hospital_wallet, &config);
+
+    let stored = client.get_hospital_config(&hospital_wallet);
+    assert_eq!(stored.departments.len(), 1);
+    assert_eq!(stored.locations.len(), 1);
+    assert_eq!(stored.equipment.len(), 1);
+    assert_eq!(stored.policies.len(), 1);
+    assert_eq!(stored.alerts.len(), 1);
+    assert_eq!(stored.insurance_providers.len(), 1);
+    assert_eq!(stored.emergency_protocols.len(), 1);
+    assert_eq!(stored.billing.currency, String::from_str(&env, "USD"));
+
+    // The owner can also mutate individual sections.
     let mut departments: Vec<Department> = Vec::new(&env);
     departments.push_back(Department {
-        name: String::from_str(&env, "Emergency"),
-        head: String::from_str(&env, "Dr. Smith"),
-        contact: String::from_str(&env, "er@rmc.org"),
+        name: String::from_str(&env, "Cardiology"),
+        head: String::from_str(&env, "Dr. Lee"),
+        contact: String::from_str(&env, "cardio@rmc.org"),
     });
+    client.update_departments(&hospital_wallet, &hospital_wallet, &departments);
 
-    let mut locations: Vec<Location> = Vec::new(&env);
-    locations.push_back(Location {
-        name: String::from_str(&env, "Main Campus"),
-        address: String::from_str(&env, "789 Pine Rd"),
-        metadata: String::from_str(&env, "24/7"),
-    });
+    let updated = client.get_hospital_config(&hospital_wallet);
+    assert_eq!(updated.departments.len(), 1);
+    assert_eq!(updated.departments.get(0).unwrap().name, String::from_str(&env, "Cardiology"));
+}
 
-    let mut equipment: Vec<EquipmentResource> = Vec::new(&env);
-    equipment.push_back(EquipmentResource {
-        name: String::from_str(&env, "MRI"),
-        quantity: 2,
-        status: String::from_str(&env, "operational"),
-        metadata: String::from_str(&env, "Siemens Aera"),
-    });
+#[test]
+fn test_set_hospital_config_admin_override() {
+    let env = Env::default();
+    let contract_id = env.register(HospitalRegistry, ());
+    let client = HospitalRegistryClient::new(&env, &contract_id);
 
-    let mut policies: Vec<PolicyProcedure> = Vec::new(&env);
-    policies.push_back(PolicyProcedure {
-        title: String::from_str(&env, "Infection Control"),
-        version: String::from_str(&env, "v3"),
-        details: String::from_str(&env, "Hand hygiene and PPE policy"),
-    });
+    let admin = Address::generate(&env);
+    let hospital_wallet = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    env.mock_all_auths();
 
-    let mut channels: Vec<String> = Vec::new(&env);
-    channels.push_back(String::from_str(&env, "sms"));
-    channels.push_back(String::from_str(&env, "email"));
-
-    let mut alerts: Vec<AlertSetting> = Vec::new(&env);
-    alerts.push_back(AlertSetting {
-        alert_type: String::from_str(&env, "emergency"),
-        enabled: true,
-        threshold: 1,
-    });
-
-    client.set_hospital_config(
+    client.initialize_admin(&admin);
+    client.register_hospital(
         &hospital_wallet,
-        &departments,
-        &locations,
-        &equipment,
-        &policies,
-        &channels,
-        &alerts,
+        &String::from_str(&env, "General Hospital"),
+        &String::from_str(&env, "123 Main St, New York, NY"),
+        &String::from_str(&env, "Services: ER, Surgery, Cardiology"),
+        &issuer,
+        &dummy_hash(&env, 1),
+        &dummy_hash(&env, 2),
+        &4_100_000_000_u64,
+        &dummy_hash(&env, 3),
     );
 
-    let config = client.get_hospital_config(&hospital_wallet);
-    assert_eq!(config.departments.len(), 1);
-    assert_eq!(config.locations.len(), 1);
-    assert_eq!(config.equipment.len(), 1);
-    assert_eq!(config.policies.len(), 1);
-    assert_eq!(config.communication_channels.len(), 2);
-    assert_eq!(config.alert_settings.len(), 1);
+    // The registered admin (not the hospital owner) may override the config.
+    let config = sample_config(&env);
+    client.set_hospital_config(&admin, &hospital_wallet, &config);
+
+    let stored = client.get_hospital_config(&hospital_wallet);
+    assert_eq!(stored.departments.len(), 1);
+    assert_eq!(stored.alerts.len(), 1);
+}
+
+#[test]
+fn test_set_hospital_config_rejects_non_owner_non_admin() {
+    let env = Env::default();
+    let contract_id = env.register(HospitalRegistry, ());
+    let client = HospitalRegistryClient::new(&env, &contract_id);
+
+    let hospital_wallet = Address::generate(&env);
+    env.mock_all_auths();
+
+    register_hospital_with_anchor(&env, &client, &hospital_wallet);
+
+    let stranger = Address::generate(&env);
+    let config = sample_config(&env);
+    let result = client.try_set_hospital_config(&stranger, &hospital_wallet, &config);
+    assert_eq!(result, Err(Ok(ContractError::HospitalNotFound)));
 }
