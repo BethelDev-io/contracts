@@ -382,3 +382,6 @@ cargo test --test integration_tests
 
 <!-- handsoff-issue-860 -->
 - #860: [hai-tracking] record_patient_days lets any caller modify any case's denominator data
+
+<!-- handsoff-issue-939 -->
+- #939: [medical-claims] Still fails to compile on main — register_reviewer use-after-move (#868) is back
