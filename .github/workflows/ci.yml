@@ -69,6 +69,24 @@ jobs:
       - name: cargo check lab-management (lib + tests)
         run: cargo check -p lab-management --tests
 
+  truncation-markers:
+    name: Check for truncated-file markers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # AI editors sometimes leave a placeholder such as
+      #   /* … truncated 142 chars — edit only what you need near the top … */
+      # in place of real code (see #930, #931). Fail if any Rust file has one.
+      - name: Fail on "truncated" placeholder comments
+        run: |
+          if git grep -nE '/\*.*truncated.*\*/' -- '*.rs'; then
+            echo "::error::Found truncated-file placeholder(s) in Rust sources (see above). Restore the missing code."
+            exit 1
+          fi
+          echo "No truncation markers found."
+
   format:
     name: Format Check
     runs-on: ubuntu-latest
@@ -263,12 +281,13 @@ jobs:
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [format, check, check-lab-management, clippy, test, build-wasm]
+    needs: [truncation-markers, format, check, check-lab-management, clippy, test, build-wasm]
     if: always()
     steps:
       - name: Check all jobs
         run: |
-          if [[ "${{ needs.format.result }}" != "success" ]] || \
+          if [[ "${{ needs.truncation-markers.result }}" != "success" ]] || \
+             [[ "${{ needs.format.result }}" != "success" ]] || \
              [[ "${{ needs.check.result }}" != "success" ]] || \
              [[ "${{ needs.check-lab-management.result }}" != "success" ]] || \
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
