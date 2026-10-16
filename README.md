@@ -388,3 +388,6 @@ cargo test --test integration_tests
 
 <!-- handsoff-issue-940 -->
 - #940: [health-records] Test suite does not compile — 97 errors since nonce parameters were added (#776)
+
+<!-- handsoff-issue-941 -->
+- #941: [patient-registry] Test suite does not compile — 95 errors from nonce parameters added in #776
