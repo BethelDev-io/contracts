@@ -385,3 +385,6 @@ cargo test --test integration_tests
 
 <!-- handsoff-issue-939 -->
 - #939: [medical-claims] Still fails to compile on main — register_reviewer use-after-move (#868) is back
+
+<!-- handsoff-issue-940 -->
+- #940: [health-records] Test suite does not compile — 97 errors since nonce parameters were added (#776)
