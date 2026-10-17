@@ -11,6 +11,32 @@ use soroban_sdk::{
 #[path = "test_enhanced.rs"]
 mod test_enhanced;
 
+/// Test-only provider-registry stand-in that treats every address as a
+/// registered provider, so prescription tests do not need the real registry.
+#[soroban_sdk::contract]
+pub struct MockProviderRegistry;
+
+#[soroban_sdk::contractimpl]
+impl MockProviderRegistry {
+    pub fn is_provider(_env: Env, _provider: Address) -> bool {
+        true
+    }
+}
+
+/// Initialize `client` with a fresh admin and a mock provider-registry (which
+/// the contract now requires before any prescription can be issued), returning
+/// the admin address for admin-only entry points.
+///
+/// `initialize` is authenticated, so auth is mocked here. Tests that assert
+/// authorization *failures* do not use this helper.
+fn init_contract(env: &Env, client: &PrescriptionContractClient) -> Address {
+    env.mock_all_auths();
+    let registry_id = env.register(MockProviderRegistry, ());
+    let admin = Address::generate(env);
+    client.initialize(&admin, &registry_id);
+    admin
+}
+
 #[test]
 fn test_prescription_lifecycle() {
     let env = Env::default();
@@ -19,6 +45,7 @@ fn test_prescription_lifecycle() {
     // Updated from register_contract to register
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -43,7 +70,7 @@ fn test_prescription_lifecycle() {
     };
 
     let prescription_id = client.issue_prescription(&provider, &patient, &request);
-    assert_eq!(prescription_id, 0);
+    assert_eq!(prescription_id, 1);
 
     // Test Dispensing
     let dispense = DispenseRequest {
@@ -74,6 +101,7 @@ fn test_fail_expired_prescription() {
 
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -142,6 +170,7 @@ fn test_issuing_beyond_max_active_prescriptions_fails() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -169,6 +198,7 @@ fn test_issuing_succeeds_after_a_prescription_is_fully_dispensed() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -211,6 +241,7 @@ fn test_issuing_succeeds_after_a_prescription_expires() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -708,6 +739,7 @@ const MIDNIGHT_JUN15: u64 = 1_718_409_600;
 fn make_client(env: &Env) -> (PrescriptionContractClient<'static>, Address, Address, Address) {
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(env, &contract_id);
+    init_contract(env, &client);
     let provider = Address::generate(env);
     let patient = Address::generate(env);
     let pharmacy = Address::generate(env);
@@ -945,6 +977,7 @@ fn test_controlled_substance_without_schedule_is_rejected() {
 
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);

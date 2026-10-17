@@ -9,6 +9,7 @@ fn test_prescription_lifecycle_invariants() {
     let env = Env::default();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -61,7 +62,10 @@ fn test_prescription_lifecycle_invariants() {
 
     // Verify prescription is fully dispensed
     let prescription: Prescription = env.as_contract(&contract_id, || {
-        env.storage().persistent().get(&prescription_id).unwrap()
+        env.storage()
+            .persistent()
+            .get(&DataKey::Prescription(prescription_id))
+            .unwrap()
     });
     assert_eq!(prescription.quantity_dispensed, 30);
     assert!(matches!(prescription.status, PrescriptionStatus::Dispensed));
@@ -72,6 +76,7 @@ fn test_prescription_transfer_ownership_verification() {
     let env = Env::default();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -130,6 +135,7 @@ fn test_controlled_substance_transfer_limits() {
     let env = Env::default();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    let admin = init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -139,6 +145,9 @@ fn test_controlled_substance_transfer_limits() {
 
     env.mock_all_auths();
 
+    // The DEA number must be registered to the prescriber (#955).
+    client.set_provider_dea(&admin, &provider, &String::from_str(&env, "AB1234563"));
+
     // Issue controlled substance prescription
     let req = IssueRequest {
         medication_name: String::from_str(&env, "Oxycodone"),
@@ -146,7 +155,7 @@ fn test_controlled_substance_transfer_limits() {
         dosage: String::from_str(&env, "5mg"),
         quantity: 30,
         days_supply: 15,
-        refills_allowed: 1,
+        refills_allowed: 0,
         instructions_hash: BytesN::from_array(&env, &[0; 32]),
         is_controlled: true,
         schedule: Some(2), // Schedule II
@@ -189,6 +198,7 @@ fn test_refill_lifecycle_management() {
     let env = Env::default();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -233,7 +243,10 @@ fn test_refill_lifecycle_management() {
 
     // Verify refill state
     let prescription: Prescription = env.as_contract(&contract_id, || {
-        env.storage().persistent().get(&prescription_id).unwrap()
+        env.storage()
+            .persistent()
+            .get(&DataKey::Prescription(prescription_id))
+            .unwrap()
     });
     assert_eq!(prescription.refills_remaining, 2);
     assert_eq!(prescription.refills_used, 1);
@@ -253,6 +266,7 @@ fn test_prescription_cancellation_safety() {
     let env = Env::default();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -308,7 +322,10 @@ fn test_prescription_cancellation_safety() {
     );
 
     let prescription: Prescription = env.as_contract(&contract_id, || {
-        env.storage().persistent().get(&prescription_id).unwrap()
+        env.storage()
+            .persistent()
+            .get(&DataKey::Prescription(prescription_id))
+            .unwrap()
     });
     assert!(matches!(prescription.status, PrescriptionStatus::Cancelled));
 }
@@ -327,6 +344,7 @@ fn test_valid_until_zero_is_rejected() {
     // Default ledger timestamp is 0.
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -361,6 +379,7 @@ fn test_valid_until_max_u64_is_rejected() {
 
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -396,6 +415,7 @@ fn test_valid_until_at_and_beyond_window_limit() {
 
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -423,7 +443,10 @@ fn test_valid_until_at_and_beyond_window_limit() {
     let id = client.issue_prescription(&provider, &patient, &req_ok);
     // Prescription was created successfully — fetch it and verify
     let p: Prescription = env.as_contract(&contract_id, || {
-        env.storage().persistent().get(&id).unwrap()
+        env.storage()
+            .persistent()
+            .get(&DataKey::Prescription(id))
+            .unwrap()
     });
     assert_eq!(p.valid_until, at_limit);
 
@@ -463,6 +486,7 @@ fn test_refill_timestamp_near_max_u64_returns_error() {
 
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -516,7 +540,9 @@ fn test_refill_timestamp_near_max_u64_returns_error() {
 //   5. Controlled substance with bad check digit → ControlledSubstanceViolation
 //   6. Non-controlled prescription with dea_number: None → accepted
 //   7. Non-controlled prescription with dea_number: Some(...) → accepted (ignored)
-//   8. Controlled substance with schedule: None → accepted even without DEA number
+//   8. Controlled substance with schedule: None → ControlledSubstanceViolation
+//   9. Schedules outside 1..=5 (0, 6, 255) → ControlledSubstanceViolation
+//  10. Checksum-valid DEA number that is not the prescriber's → ControlledSubstanceViolation
 
 /// Helper: build a minimal IssueRequest for DEA tests.
 /// Valid DEA "AB1234563": A=registrant type, B=last-name initial.
@@ -555,9 +581,13 @@ fn test_controlled_with_valid_dea_number_accepted() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    let admin = init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
+
+    // The DEA number must be registered to the prescriber (#955).
+    client.set_provider_dea(&admin, &provider, &String::from_str(&env, "AB1234563"));
 
     let req = make_dea_test_req(
         &env,
@@ -580,6 +610,7 @@ fn test_controlled_missing_dea_number_rejected() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -597,6 +628,7 @@ fn test_controlled_dea_number_wrong_length_rejected() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -622,6 +654,7 @@ fn test_controlled_dea_number_too_long_rejected() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -647,6 +680,7 @@ fn test_controlled_dea_number_first_char_not_letter_rejected() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -673,6 +707,7 @@ fn test_controlled_dea_number_bad_check_digit_rejected() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -697,6 +732,7 @@ fn test_non_controlled_none_dea_accepted() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -714,6 +750,7 @@ fn test_non_controlled_with_dea_accepted() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -731,23 +768,24 @@ fn test_non_controlled_with_dea_accepted() {
     assert!(id < u64::MAX);
 }
 
-/// Controlled prescription with schedule: None skips DEA validation entirely.
-/// (No schedule means it is not a scheduled controlled substance.)
+/// Controlled prescription with schedule: None must be rejected — an
+/// `is_controlled` request requires an explicit schedule in `1..=5` (#955).
 #[test]
-fn test_controlled_no_schedule_skips_dea_check() {
+fn test_controlled_no_schedule_rejected() {
     let env = Env::default();
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
 
-    // is_controlled true but schedule None — DEA check is not triggered
+    // is_controlled true but schedule None — not a valid scheduled substance
     let req = make_dea_test_req(&env, &provider, &patient, true, None, None);
 
-    let id = client.issue_prescription(&provider, &patient, &req);
-    assert!(id < u64::MAX);
+    let result = client.try_issue_prescription(&provider, &patient, &req);
+    assert_eq!(result, Err(Ok(Error::ControlledSubstanceViolation)));
 }
 
 /// Second valid DEA number to confirm the check-digit algorithm with a
@@ -760,9 +798,13 @@ fn test_controlled_alternative_valid_dea_number_accepted() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    let admin = init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
+
+    // The DEA number must be registered to the prescriber (#955).
+    client.set_provider_dea(&admin, &provider, &String::from_str(&env, "BC2345672"));
 
     let req = make_dea_test_req(
         &env,
@@ -785,6 +827,7 @@ fn test_rate_limit_exceeded_after_default_cap() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let admin = Address::generate(&env);
     let provider = Address::generate(&env);
@@ -829,6 +872,7 @@ fn test_rate_limit_resets_after_window() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let admin = Address::generate(&env);
     let provider = Address::generate(&env);
@@ -879,6 +923,7 @@ fn test_admin_set_provider_limit_works() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let admin = Address::generate(&env);
     let provider = Address::generate(&env);
@@ -957,6 +1002,7 @@ fn test_non_bypass_prescription_unaffected() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -992,6 +1038,7 @@ fn test_create_and_issue_from_template() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -1020,7 +1067,10 @@ fn test_create_and_issue_from_template() {
 
     // Prescription was stored
     let rx: Prescription = env.as_contract(&contract_id, || {
-        env.storage().persistent().get(&rx_id).unwrap()
+        env.storage()
+            .persistent()
+            .get(&DataKey::Prescription(rx_id))
+            .unwrap()
     });
     assert_eq!(rx.medication_name, String::from_str(&env, "Metformin"));
     assert_eq!(rx.quantity, 60);
@@ -1035,6 +1085,7 @@ fn test_non_owning_provider_cannot_use_template() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let owner = Address::generate(&env);
     let other = Address::generate(&env);
@@ -1073,6 +1124,7 @@ fn test_create_template_and_issue_prescription_independently() {
     env.mock_all_auths();
     let contract_id = env.register(PrescriptionContract, ());
     let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
 
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -1120,12 +1172,15 @@ fn test_create_template_and_issue_prescription_independently() {
     };
 
     let rx_id = client.issue_prescription(&provider, &patient, &req);
-    // Prescription IDs start at 0 (RxCounter)
-    assert_eq!(rx_id, 0);
+    // Prescription ids start at 1
+    assert_eq!(rx_id, 1);
 
     // Verify the prescription was stored independently
     let stored: Prescription = env.as_contract(&contract_id, || {
-        env.storage().persistent().get(&rx_id).unwrap()
+        env.storage()
+            .persistent()
+            .get(&DataKey::Prescription(rx_id))
+            .unwrap()
     });
     assert_eq!(stored.medication_name, String::from_str(&env, "Amoxicillin"));
     assert_eq!(stored.provider_id, provider);
@@ -1137,4 +1192,319 @@ fn test_create_template_and_issue_prescription_independently() {
     });
     assert_eq!(stored_template.medication_name, String::from_str(&env, "Lisinopril"));
     assert_eq!(stored_template.provider, provider);
+}
+
+// ── #954: the provider-registry is mandatory (fail-closed) ───────────────────
+
+/// Issuing before `initialize` must fail closed instead of letting anyone
+/// prescribe.
+#[test]
+fn test_issue_prescription_without_initialization_fails_closed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PrescriptionContract, ());
+    let client = PrescriptionContractClient::new(&env, &contract_id);
+
+    let provider = Address::generate(&env);
+    let patient = Address::generate(&env);
+
+    let req = make_dea_test_req(&env, &provider, &patient, false, None, None);
+
+    let result = client.try_issue_prescription(&provider, &patient, &req);
+    assert_eq!(result, Err(Ok(Error::NotInitialized)));
+}
+
+/// `create_template` must fail closed as well.
+#[test]
+fn test_create_template_without_initialization_fails_closed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PrescriptionContract, ());
+    let client = PrescriptionContractClient::new(&env, &contract_id);
+
+    let provider = Address::generate(&env);
+
+    let template = PrescriptionTemplate {
+        medication_name: String::from_str(&env, "Metformin"),
+        ndc_code: String::from_str(&env, "00093-7267-01"),
+        dosage: String::from_str(&env, "500mg"),
+        quantity: 60,
+        days_supply: 30,
+        refills_allowed: 3,
+        instructions_hash: BytesN::from_array(&env, &[1u8; 32]),
+        is_controlled: false,
+        schedule: None,
+        substitution_allowed: true,
+        pharmacy_id: None,
+        bypass_allergy_check: false,
+        dea_number: None,
+        bypass_reason_hash: None,
+    };
+
+    let result = client.try_create_template(&provider, &template);
+    assert_eq!(result, Err(Ok(Error::NotInitialized)));
+}
+
+/// `initialize` must be authenticated, so an attacker cannot front-run
+/// deployment and point the contract at a registry whose `is_provider` always
+/// returns `true`.
+#[test]
+fn test_initialize_requires_admin_auth() {
+    let env = Env::default();
+    let contract_id = env.register(PrescriptionContract, ());
+    let client = PrescriptionContractClient::new(&env, &contract_id);
+
+    let attacker = Address::generate(&env);
+    let rogue_registry = env.register(MockProviderRegistry, ());
+
+    // No authorization is mocked for `attacker`.
+    let result = client.try_initialize(&attacker, &rogue_registry);
+    assert!(result.is_err());
+}
+
+/// Only the configured admin may re-point the provider-registry.
+#[test]
+fn test_set_provider_registry_is_admin_only() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PrescriptionContract, ());
+    let client = PrescriptionContractClient::new(&env, &contract_id);
+    let admin = init_contract(&env, &client);
+
+    let attacker = Address::generate(&env);
+    let replacement = env.register(MockProviderRegistry, ());
+
+    let rejected = client.try_set_provider_registry(&attacker, &replacement);
+    assert_eq!(rejected, Err(Ok(Error::Unauthorized)));
+
+    // The legitimate admin can still correct the registry.
+    client.set_provider_registry(&admin, &replacement);
+}
+
+// ── #955: DEA number bound to the prescriber ─────────────────────────────────
+
+/// A checksum-valid DEA number must belong to the prescriber: an unregistered
+/// provider is rejected, and a provider quoting someone else's number is too.
+#[test]
+fn test_dea_number_must_match_prescriber() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PrescriptionContract, ());
+    let client = PrescriptionContractClient::new(&env, &contract_id);
+    let admin = init_contract(&env, &client);
+
+    let provider = Address::generate(&env);
+    let other_provider = Address::generate(&env);
+    let patient = Address::generate(&env);
+
+    // The number is registered to a different provider.
+    client.set_provider_dea(&admin, &other_provider, &String::from_str(&env, "AB1234563"));
+
+    let quoted = Some(String::from_str(&env, "AB1234563"));
+    let req = make_dea_test_req(&env, &provider, &patient, true, Some(2), quoted.clone());
+    let result = client.try_issue_prescription(&provider, &patient, &req);
+    assert_eq!(result, Err(Ok(Error::ProviderNotRegistered)));
+
+    // Now the prescriber has a *different* valid number registered.
+    client.set_provider_dea(&admin, &provider, &String::from_str(&env, "BC2345672"));
+    let req = make_dea_test_req(&env, &provider, &patient, true, Some(2), quoted);
+    let result = client.try_issue_prescription(&provider, &patient, &req);
+    assert_eq!(result, Err(Ok(Error::ControlledSubstanceViolation)));
+}
+
+/// Schedules outside `1..=5` must be rejected rather than stored.
+#[test]
+fn test_schedule_out_of_range_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PrescriptionContract, ());
+    let client = PrescriptionContractClient::new(&env, &contract_id);
+    let admin = init_contract(&env, &client);
+
+    let provider = Address::generate(&env);
+    let patient = Address::generate(&env);
+    client.set_provider_dea(&admin, &provider, &String::from_str(&env, "AB1234563"));
+
+    for schedule in [0u32, 6u32, 255u32].iter() {
+        let req = make_dea_test_req(
+            &env,
+            &provider,
+            &patient,
+            true,
+            Some(*schedule),
+            Some(String::from_str(&env, "AB1234563")),
+        );
+        let result = client.try_issue_prescription(&provider, &patient, &req);
+        assert_eq!(result, Err(Ok(Error::ControlledSubstanceViolation)));
+    }
+}
+
+/// Schedule II may not carry refills; schedules III–IV are capped at 5 refills
+/// and a 180-day supply.
+#[test]
+fn test_schedule_refill_and_days_supply_caps() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PrescriptionContract, ());
+    let client = PrescriptionContractClient::new(&env, &contract_id);
+    let admin = init_contract(&env, &client);
+
+    let provider = Address::generate(&env);
+    let patient = Address::generate(&env);
+    client.set_provider_dea(&admin, &provider, &String::from_str(&env, "AB1234563"));
+
+    let dea = Some(String::from_str(&env, "AB1234563"));
+
+    // Schedule II with a refill.
+    let mut req = make_dea_test_req(&env, &provider, &patient, true, Some(2), dea.clone());
+    req.refills_allowed = 1;
+    let result = client.try_issue_prescription(&provider, &patient, &req);
+    assert_eq!(result, Err(Ok(Error::ControlledSubstanceViolation)));
+
+    // Schedule III with six refills.
+    let mut req = make_dea_test_req(&env, &provider, &patient, true, Some(3), dea.clone());
+    req.refills_allowed = 6;
+    let result = client.try_issue_prescription(&provider, &patient, &req);
+    assert_eq!(result, Err(Ok(Error::ControlledSubstanceViolation)));
+
+    // Schedule IV with a 181-day supply.
+    let mut req = make_dea_test_req(&env, &provider, &patient, true, Some(4), dea.clone());
+    req.refills_allowed = 5;
+    req.days_supply = 181;
+    let result = client.try_issue_prescription(&provider, &patient, &req);
+    assert_eq!(result, Err(Ok(Error::ControlledSubstanceViolation)));
+
+    // Schedule III at the caps (5 refills, 180 days) is accepted.
+    let mut req = make_dea_test_req(&env, &provider, &patient, true, Some(3), dea);
+    req.refills_allowed = 5;
+    req.days_supply = 180;
+    let id = client.issue_prescription(&provider, &patient, &req);
+    assert_eq!(id, 1);
+}
+
+/// `set_provider_dea` is admin-only and validates the checksum before storing.
+#[test]
+fn test_set_provider_dea_requires_admin_and_valid_checksum() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PrescriptionContract, ());
+    let client = PrescriptionContractClient::new(&env, &contract_id);
+    let admin = init_contract(&env, &client);
+
+    let attacker = Address::generate(&env);
+    let provider = Address::generate(&env);
+
+    let rejected =
+        client.try_set_provider_dea(&attacker, &provider, &String::from_str(&env, "AB1234563"));
+    assert_eq!(rejected, Err(Ok(Error::Unauthorized)));
+
+    // Wrong check digit: rejected, nothing recorded.
+    let invalid =
+        client.try_set_provider_dea(&admin, &provider, &String::from_str(&env, "AB1234560"));
+    assert_eq!(invalid, Err(Ok(Error::ControlledSubstanceViolation)));
+    assert_eq!(client.get_provider_dea(&provider), None);
+
+    client.set_provider_dea(&admin, &provider, &String::from_str(&env, "AB1234563"));
+    assert_eq!(
+        client.get_provider_dea(&provider),
+        Some(String::from_str(&env, "AB1234563"))
+    );
+}
+
+// ── #956: namespaced prescription keys ───────────────────────────────────────
+
+/// The prescription counter uses checked arithmetic instead of wrapping.
+#[test]
+fn test_prescription_counter_overflow_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PrescriptionContract, ());
+    let client = PrescriptionContractClient::new(&env, &contract_id);
+    init_contract(&env, &client);
+
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .set(&DataKey::PrescriptionCounter, &u64::MAX);
+    });
+
+    let provider = Address::generate(&env);
+    let patient = Address::generate(&env);
+    let req = make_dea_test_req(&env, &provider, &patient, false, None, None);
+
+    let result = client.try_issue_prescription(&provider, &patient, &req);
+    assert_eq!(result, Err(Ok(Error::TimestampOverflow)));
+}
+
+/// The one-off migration moves legacy raw-keyed prescriptions into the
+/// namespaced keyspace, with ids shifted so they start at 1.
+#[test]
+fn test_migrate_prescription_keys() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PrescriptionContract, ());
+    let client = PrescriptionContractClient::new(&env, &contract_id);
+    let admin = init_contract(&env, &client);
+
+    let provider = Address::generate(&env);
+    let patient = Address::generate(&env);
+
+    // Legacy layout: record under raw key 0, counter under raw "RxCounter".
+    env.as_contract(&contract_id, || {
+        let legacy = Prescription {
+            provider_id: provider.clone(),
+            patient_id: patient.clone(),
+            medication_name: String::from_str(&env, "LegacyDrug"),
+            quantity: 10,
+            quantity_dispensed: 0,
+            refills_allowed: 0,
+            refills_remaining: 0,
+            refills_used: 0,
+            is_controlled: false,
+            schedule: None,
+            current_pharmacy: None,
+            issuing_pharmacy: None,
+            status: PrescriptionStatus::Issued,
+            issued_at: 0,
+            valid_until: 10_000,
+            last_dispensed: None,
+            transfer_count: 0,
+            transfer_history: Vec::new(&env),
+        };
+        env.storage().persistent().set(&0u64, &legacy);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "RxCounter"), &1u64);
+    });
+
+    let migrated = client.migrate_prescription_keys(&admin);
+    assert_eq!(migrated, 1);
+
+    env.as_contract(&contract_id, || {
+        let record: Prescription = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Prescription(1))
+            .unwrap();
+        assert_eq!(record.patient_id, patient);
+
+        // The legacy raw key is gone.
+        assert!(
+            env.storage()
+                .persistent()
+                .get::<u64, Prescription>(&0u64)
+                .is_none()
+        );
+
+        // The patient index was rebuilt against the new id.
+        let ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PatientPrescriptions(patient.clone()))
+            .unwrap();
+        assert_eq!(ids.get(0).unwrap(), 1);
+    });
+
+    // A second run is a no-op.
+    assert_eq!(client.migrate_prescription_keys(&admin), 0);
 }
