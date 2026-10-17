@@ -140,6 +140,8 @@ pub enum DataKey {
     JobResultQuality(u64),
     PendingAdmin,
     RotationExpiry,
+    /// Executor/oracle address authorized to report job completion (#950).
+    Executor,
     RequesterCpuUsed(Address),
     RequesterMemoryUsed(Address),
     RequesterCpuLimit,
@@ -187,6 +189,30 @@ impl HealthcareAnalytics {
             return Err(Error::Unauthorized);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        Ok(())
+    }
+
+    /// Configure the executor/oracle address allowed to report job completion
+    /// (#950). Admin-only.
+    ///
+    /// Usage metering is reported by the executor rather than by the job's own
+    /// requester, so requester quotas and overrun incidents cannot be evaded by
+    /// self-reporting `0, 0`.
+    pub fn set_executor(env: Env, admin: Address, executor: Address) -> Result<(), Error> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+
+        env.storage().instance().set(&DataKey::Executor, &executor);
+        env.events()
+            .publish((symbol_short!("set_exec"), admin), executor);
         Ok(())
     }
 
@@ -382,8 +408,9 @@ impl HealthcareAnalytics {
         }
 
         if let Some(job_id) = get_next_job_for_execution(&env) {
-            // Start execution (in real implementation, this would spawn background job)
-            let _ = shared::resource_management::start_job(&env, job_id);
+            // Start execution (in real implementation, this would spawn background job).
+            // A job that failed to start must not be reported as started (#950).
+            shared::resource_management::start_job(&env, job_id).map_err(|_| Error::JobFailure)?;
             env.events()
                 .publish((symbol_short!("exec_job"), job_id), symbol_short!("started"));
             Ok(Some(job_id))
@@ -392,10 +419,34 @@ impl HealthcareAnalytics {
         }
     }
 
-    /// Mark a report job as completed with actual resource usage
-    pub fn complete_report(env: Env, job_id: u64, cpu_used: u64, memory_used: u64, wall_time_ms: u64) -> Result<(), Error> {
+    /// Mark a report job as completed with actual resource usage.
+    ///
+    /// Only the configured executor/oracle (or the admin) may report usage
+    /// (#950): the values are metered by the executing party, so the job's own
+    /// requester must not be able to report them.
+    pub fn complete_report(
+        env: Env,
+        executor: Address,
+        job_id: u64,
+        cpu_used: u64,
+        memory_used: u64,
+        wall_time_ms: u64,
+    ) -> Result<(), Error> {
+        executor.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Unauthorized)?;
+        let configured_executor: Option<Address> = env.storage().instance().get(&DataKey::Executor);
+        let is_authorized = executor == admin
+            || configured_executor.map_or(false, |configured| configured == executor);
+        if !is_authorized {
+            return Err(Error::Unauthorized);
+        }
+
         let job = get_job(&env, job_id).map_err(|_| Error::JobNotFound)?;
-        job.requested_by.require_auth();
 
         if job.state != JobState::Running {
             return Err(Error::JobNotFound);
@@ -421,7 +472,7 @@ impl HealthcareAnalytics {
             let _ = attach_evidence(&env, incident_id, EvidenceType::ContextData, hash, job.requested_by.clone());
         }
 
-        // Update per-requester cumulative usage.
+        // Update per-requester cumulative usage (checked to avoid silent wrap).
         let req_cpu: u64 = env
             .storage()
             .persistent()
@@ -432,13 +483,17 @@ impl HealthcareAnalytics {
             .persistent()
             .get(&DataKey::RequesterMemoryUsed(job.requested_by.clone()))
             .unwrap_or(0);
+        let total_cpu = req_cpu.checked_add(cpu_used).ok_or(Error::ArithmeticOverflow)?;
+        let total_mem = req_mem
+            .checked_add(memory_used)
+            .ok_or(Error::ArithmeticOverflow)?;
         env.storage().persistent().set(
             &DataKey::RequesterCpuUsed(job.requested_by.clone()),
-            &(req_cpu + cpu_used),
+            &total_cpu,
         );
         env.storage().persistent().set(
             &DataKey::RequesterMemoryUsed(job.requested_by.clone()),
-            &(req_mem + memory_used),
+            &total_mem,
         );
 
         let result_quality: ResultQuality = env

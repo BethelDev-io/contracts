@@ -213,14 +213,16 @@ pub fn request_report(
 ) -> Result<u64, Error>
 
 // Execute next available job respecting resource limits
-pub fn execute_next_report(env: Env) -> Option<u64>
+pub fn execute_next_report(env: Env, admin: Address) -> Result<Option<u64>, Error>
 
-// Mark job as completed with actual resource usage
+// Mark job as completed with actual resource usage (executor/oracle or admin only)
 pub fn complete_report(
     env: Env,
+    executor: Address,
     job_id: u64,
     cpu_used: u64,
     memory_used: u64,
+    wall_time_ms: u64,
 ) -> Result<(), Error>
 
 // Get current resource limits
@@ -355,11 +357,11 @@ pub fn generate_adverse_events_report(...) -> Result<u64, Error> {
     )?;
     
     // Later: execute next job
-    if let Some(executing_job) = HealthcareAnalytics::execute_next_report(env) {
+    if let Some(executing_job) = HealthcareAnalytics::execute_next_report(env, admin)? {
         // ... perform report generation ...
         
-        // Record actual resource usage
-        HealthcareAnalytics::complete_report(env, executing_job, 3_200_000, 450_000)?;
+        // Record actual resource usage (executor/oracle reports it, not the requester)
+        HealthcareAnalytics::complete_report(env, executor, executing_job, 3_200_000, 450_000, 1_500)?;
     }
     
     Ok(job_id)

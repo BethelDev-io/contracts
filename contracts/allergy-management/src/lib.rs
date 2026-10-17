@@ -197,6 +197,95 @@ impl AllergyManagement {
         Ok(allergy_id)
     }
 
+    /// Grant another address (provider, guardian or contract such as
+    /// prescription-management) read access to a patient's allergy records.
+    /// Authorized by the patient.
+    pub fn grant_access(env: Env, patient_id: Address, provider_id: Address) -> Result<(), Error> {
+        patient_id.require_auth();
+
+        storage::grant_access(&env, &patient_id, &provider_id);
+
+        AccessGranted {
+            version: EVENT_VERSION,
+            patient_id,
+            provider_id,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Revoke a previously granted access. Authorized by the patient.
+    pub fn revoke_access(env: Env, patient_id: Address, provider_id: Address) -> Result<(), Error> {
+        patient_id.require_auth();
+
+        storage::revoke_access(&env, &patient_id, &provider_id);
+
+        AccessRevoked {
+            version: EVENT_VERSION,
+            patient_id,
+            provider_id,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Check a drug against a patient's active medication allergies and return
+    /// the detected interactions.
+    ///
+    /// The caller must authorize as `requester` and `requester` must already
+    /// hold read access to the patient's records (the patient, the admin, or an
+    /// explicitly granted address — e.g. the prescription-management contract).
+    pub fn check_drug_allergy_interaction(
+        env: Env,
+        patient_id: Address,
+        requester: Address,
+        drug_name: String,
+    ) -> Result<Vec<AllergyInteraction>, Error> {
+        requester.require_auth();
+
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        if !storage::check_access_permission(&env, &patient_id, &requester) {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut interactions: Vec<AllergyInteraction> = Vec::new(&env);
+
+        for allergy_id in storage::get_patient_allergies(&env, &patient_id).iter() {
+            let allergy = match storage::get_allergy(&env, allergy_id) {
+                Ok(allergy) => allergy,
+                Err(_) => continue,
+            };
+
+            // Only active medication allergies can interact with a drug.
+            if !allergy.status.is_active() || allergy.allergen_type != symbol_short!("med") {
+                continue;
+            }
+
+            let interaction_type = if validation::check_drug_match(&allergy.allergen, &drug_name) {
+                symbol_short!("direct")
+            } else if validation::check_cross_sensitivity(&env, &allergy.allergen, &drug_name) {
+                symbol_short!("cross")
+            } else {
+                continue;
+            };
+
+            interactions.push_back(AllergyInteraction {
+                allergy_id,
+                allergen: allergy.allergen.clone(),
+                severity: allergy.severity.clone(),
+                reaction_type: allergy.reaction_type.clone(),
+                interaction_type,
+            });
+        }
+
+        Ok(interactions)
+    }
+
     /// Check if an address is a registered provider
     fn is_registered_provider(env: &Env, provider_id: &Address) -> bool {
         let provider_registry: Address = env.storage().instance().get(&DataKey::ProviderRegistry).unwrap();

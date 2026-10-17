@@ -66,8 +66,13 @@ impl ZkEligibilityVerifier {
             Some(addr) => addr,
             None => return false, // Not initialized; cannot verify
         };
+        // Fail closed: a missing, archived, trapping or interface-incompatible
+        // target must answer "not eligible" instead of aborting the caller (#951).
         let client = zk_eligibility::ZkEligibilityClient::new(&env, &zk_contract);
-        client.is_eligible(&subject)
+        match client.try_is_eligible(&subject) {
+            Ok(Ok(eligible)) => eligible,
+            _ => false,
+        }
     }
 
     /// Update the zk-eligibility contract address. Admin only.
