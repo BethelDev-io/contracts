@@ -58,10 +58,8 @@ fn setup_client<'a>(env: &'a Env, insurer: &Address) -> PriorAuthorizationContra
 }
 
 fn register_contract<'a>(env: &'a Env, insurer_registry_id: &Address) -> PriorAuthorizationContractClient<'a> {
-    let contract_id = env.register(PriorAuthorizationContract, ());
-    let client = PriorAuthorizationContractClient::new(env, &contract_id);
-    client.initialize(insurer_registry_id);
-    client
+    let contract_id = env.register(PriorAuthorizationContract, (insurer_registry_id,));
+    PriorAuthorizationContractClient::new(env, &contract_id)
 }
 
 fn submit(

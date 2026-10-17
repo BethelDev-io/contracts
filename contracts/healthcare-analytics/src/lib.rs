@@ -180,14 +180,12 @@ pub struct HealthcareAnalytics;
 
 #[contractimpl]
 impl HealthcareAnalytics {
-    /// Initialize the analytics contract with admin and resource limits
-    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
-        admin.require_auth();
-        if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::Unauthorized);
-        }
+    /// Bind the contract to an admin address.
+    ///
+    /// Runs atomically as part of contract creation and cannot be called again,
+    /// so an attacker cannot front-run deployment and elect themselves admin.
+    pub fn __constructor(env: Env, admin: Address) {
         env.storage().instance().set(&DataKey::Admin, &admin);
-        Ok(())
     }
 
     /// Request a report generation job.

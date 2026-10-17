@@ -151,10 +151,9 @@ fn test_reminders() {
 #[should_panic(expected = "HostError: Error(Auth, InvalidAction)")]
 fn test_unauthorized_registration() {
     let env = Env::default();
-    let contract_id = env.register(ClinicalGuidelineContract, ());
-    let client = ClinicalGuidelineContractClient::new(&env, &contract_id);
-
     let admin = Address::generate(&env);
+    let contract_id = env.register(ClinicalGuidelineContract, (&admin,));
+    let client = ClinicalGuidelineContractClient::new(&env, &contract_id);
 
     client.register_clinical_guideline(
         &admin,
@@ -171,13 +170,10 @@ fn test_unauthorized_registration() {
 #[test]
 fn test_register_guideline_emits_event() {
     let env = Env::default();
-    let contract_id = env.register(ClinicalGuidelineContract, ());
-    let client = ClinicalGuidelineContractClient::new(&env, &contract_id);
-
     let admin = Address::generate(&env);
     env.mock_all_auths();
-
-    client.initialize(&admin);
+    let contract_id = env.register(ClinicalGuidelineContract, (&admin,));
+    let client = ClinicalGuidelineContractClient::new(&env, &contract_id);
 
     let guideline_id = String::from_str(&env, "G123");
     let condition = String::from_str(&env, "Flu");
@@ -202,13 +198,10 @@ fn test_register_guideline_emits_event() {
 #[test]
 fn test_update_guideline_emits_event() {
     let env = Env::default();
-    let contract_id = env.register(ClinicalGuidelineContract, ());
-    let client = ClinicalGuidelineContractClient::new(&env, &contract_id);
-
     let admin = Address::generate(&env);
     env.mock_all_auths();
-
-    client.initialize(&admin);
+    let contract_id = env.register(ClinicalGuidelineContract, (&admin,));
+    let client = ClinicalGuidelineContractClient::new(&env, &contract_id);
 
     let guideline_id = String::from_str(&env, "G123");
     let condition = String::from_str(&env, "Flu");

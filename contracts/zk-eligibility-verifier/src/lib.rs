@@ -30,7 +30,6 @@ pub enum DataKey {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    AlreadyInitialized = 1,
     NotInitialized = 2,
     Unauthorized = 3,
 }
@@ -40,20 +39,17 @@ pub struct ZkEligibilityVerifier;
 
 #[contractimpl]
 impl ZkEligibilityVerifier {
-    pub fn initialize(
+    /// Runs atomically as part of contract creation, so the deployer binds the
+    /// admin and verifier addresses and no front-running `initialize` call is possible.
+    pub fn __constructor(
         env: Env,
         admin: Address,
         zk_eligibility_contract: Address,
-    ) -> Result<(), Error> {
-        if env.storage().persistent().has(&DataKey::ZkEligibilityContract) {
-            return Err(Error::AlreadyInitialized);
-        }
-        admin.require_auth();
+    ) {
         env.storage().persistent().set(&DataKey::Admin, &admin);
         env.storage()
             .persistent()
             .set(&DataKey::ZkEligibilityContract, &zk_eligibility_contract);
-        Ok(())
     }
 
     /// Check eligibility by delegating to the configured zk-eligibility contract.

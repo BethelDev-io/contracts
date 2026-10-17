@@ -86,14 +86,17 @@ fn setup(
     // Mock financial records contract (not needed for these tests)
     let fr_id = Address::generate(env);
 
-    let contract_id = env.register(MedicalClaimsSystem, ());
-    let client = MedicalClaimsSystemClient::new(env, &contract_id);
     let admin = Address::generate(env);
     let provider = Address::generate(env);
     let patient = Address::generate(env);
     let insurer = Address::generate(env);
     let ir_id = register_active_insurer(env, &insurer);
-    client.initialize(&admin, &ac_id, &fr_id, &86400, &ir_id);
+
+    let contract_id = env.register(
+        MedicalClaimsSystem,
+        (&admin, &ac_id, &fr_id, &86400u64, &ir_id),
+    );
+    let client = MedicalClaimsSystemClient::new(env, &contract_id);
     client.register_insurer(&admin, &insurer);
     (client, admin, provider, patient, insurer)
 }
@@ -720,8 +723,6 @@ fn test_integration_expired_insurer_returns_insurer_not_active() {
 
     let ac_id = env.register(MockAccessControl, ());
     let fr_id = Address::generate(&env);
-    let contract_id = env.register_contract(None, MedicalClaimsSystem);
-    let client = MedicalClaimsSystemClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -743,7 +744,12 @@ fn test_integration_expired_insurer_returns_insurer_not_active() {
         &dummy_hash(&env, 3),
     );
 
-    client.initialize(&admin, &ac_id, &fr_id, &86400, &ir_id);
+    let contract_id = env.register(
+        MedicalClaimsSystem,
+        (&admin, &ac_id, &fr_id, &86400u64, &ir_id),
+    );
+    let client = MedicalClaimsSystemClient::new(&env, &contract_id);
+
     client.register_insurer(&admin, &insurer);
     env.ledger().with_mut(|li| li.timestamp = 200);
 

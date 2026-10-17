@@ -22,10 +22,9 @@ fn setup() -> (Env, Address, ZkEligibilityClient<'static>) {
     env.ledger().with_mut(|l| {
         l.timestamp = BASE_TIMESTAMP;
     });
-    let contract_id = env.register(ZkEligibility, ());
-    let client = ZkEligibilityClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let contract_id = env.register(ZkEligibility, (&admin,));
+    let client = ZkEligibilityClient::new(&env, &contract_id);
     (env, admin, client)
 }
 
@@ -108,21 +107,19 @@ fn valid_bundle(env: &Env, vk_bytes: &Bytes, schema_version: u32) -> ProofBundle
     ProofBundle { proof, public_inputs: inputs, schema_version }
 }
 
-// ── initialize ────────────────────────────────────────────────────────────────
-
-#[test]
-fn test_double_initialize_returns_error() {
-    let (_, admin, client) = setup();
-    let err = client.try_initialize(&admin).unwrap_err().unwrap();
-    assert_eq!(err, Error::AlreadyInitialized);
-}
+// ── constructor ───────────────────────────────────────────────────────────────
 
 #[test]
 fn test_call_before_init_returns_error() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register(ZkEligibility, ());
+    let admin = Address::generate(&env);
+    let contract_id = env.register(ZkEligibility, (&admin,));
     let client = ZkEligibilityClient::new(&env, &contract_id);
+    // Simulate a contract deployed without running the constructor.
+    env.as_contract(&contract_id, || {
+        env.storage().persistent().remove(&DataKey::Initialized);
+    });
     let admin = Address::generate(&env);
     let err = client
         .try_register_verifier_key(&admin, &1u32, &vk(&env, 0xAA))

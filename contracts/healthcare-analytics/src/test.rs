@@ -6,10 +6,9 @@ use soroban_sdk::{symbol_short, testutils::Address as _, Address, BytesN, Env, S
 fn setup() -> (Env, HealthcareAnalyticsClient<'static>, Address) {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register(HealthcareAnalytics, ());
-    let client = HealthcareAnalyticsClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let contract_id = env.register(HealthcareAnalytics, (&admin,));
+    let client = HealthcareAnalyticsClient::new(&env, &contract_id);
     let recorder = Address::generate(&env);
     client.authorize_provider(&admin, &recorder);
     (env, client, recorder)
@@ -748,10 +747,9 @@ fn test_time_series_support() {
 fn setup_with_admin() -> (Env, HealthcareAnalyticsClient<'static>, Address) {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register(HealthcareAnalytics, ());
-    let client = HealthcareAnalyticsClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let contract_id = env.register(HealthcareAnalytics, (&admin,));
+    let client = HealthcareAnalyticsClient::new(&env, &contract_id);
     (env, client, admin)
 }
 
