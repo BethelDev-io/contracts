@@ -997,6 +997,11 @@ impl MedicalRegistry {
 
     /// Register multiple patients in one transaction.
     ///
+    /// Admin-only: the caller must be the contract admin, and every entry
+    /// wallet must authorize its own registration. Without those checks any
+    /// account could squat arbitrary wallets as patients (registration is
+    /// insert-only, so a squatted wallet could never register itself).
+    ///
     /// Returns a `Vec<BatchEntryStatus>` aligned 1-to-1 with `entries`.
     /// Already-registered wallets produce `AlreadyExists` (no error, no overwrite).
     /// Validation failures produce `Failed(error_code)`.
@@ -1009,6 +1014,7 @@ impl MedicalRegistry {
         if entries.len() > MAX_BATCH_SIZE {
             return Err(ContractError::BatchTooLarge);
         }
+        Self::require_admin(&env);
 
         let mut results: Vec<BatchEntryStatus> = Vec::new(&env);
 
@@ -1032,6 +1038,9 @@ impl MedicalRegistry {
                 results.push_back(BatchEntryStatus::AlreadyExists);
                 continue;
             }
+
+            // Each wallet must consent to being registered in this batch.
+            entry.wallet.require_auth();
 
             let patient = PatientData {
                 name: entry.name.clone(),
