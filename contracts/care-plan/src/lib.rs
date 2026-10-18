@@ -263,6 +263,7 @@ impl CarePlanContract {
         goal.status = GoalStatus::Achieved;
         goal.achievement_date = Some(achievement_date);
         goal.outcome_notes = Some(outcome_notes);
+
         save_goal(&env, &goal);
 
         env.events().publish(
@@ -273,12 +274,65 @@ impl CarePlanContract {
         Ok(())
     }
 
-    /// Resolve a barrier on a care plan.
+    /// Add a barrier to a care plan.
+    pub fn add_barrier(
+        env: Env,
+        care_plan_id: u64,
+        reporter: Address,
+        barrier_type: Symbol,
+        description: String,
+        identified_date: u64,
+    ) -> Result<u64, Error> {
+        reporter.require_auth();
+
+        let plan = load_care_plan(&env, care_plan_id).ok_or(Error::CarePlanNotFound)?;
+        if !is_bound_to_plan(&env, &plan, &reporter) {
+            return Err(Error::Unauthorized);
+        }
+        if matches!(
+            plan.status,
+            CarePlanStatus::Completed | CarePlanStatus::Discontinued
+        ) {
+            return Err(Error::CarePlanClosed);
+        }
+
+        let barrier_id = next_barrier_id(&env);
+
+        let barrier = Barrier {
+            barrier_id,
+            care_plan_id,
+            reporter: reporter.clone(),
+            barrier_type,
+            description,
+            identified_date,
+            resolved: false,
+            resolution: None,
+            resolution_date: None,
+            resolved_by: None,
+        };
+
+        save_barrier(&env, &barrier);
+        add_plan_barrier(&env, care_plan_id, barrier_id);
+
+        env.events().publish(
+            (Symbol::new(&env, "barrier_added"),),
+            (care_plan_id, barrier_id),
+        );
+
+        Ok(barrier_id)
+    }
+
+    /// Resolve a barrier.
+    ///
+    /// Allowed even if the parent care plan has since been completed or discontinued, for
+    /// the same reason as `mark_goal_achieved`: it closes out existing state rather than
+    /// adding new activity to a closed plan.
     pub fn resolve_barrier(
         env: Env,
         barrier_id: u64,
         provider_id: Address,
-        resolution_notes: String,
+        resolution: String,
+        resolution_date: u64,
     ) -> Result<(), Error> {
         provider_id.require_auth();
 
@@ -288,10 +342,15 @@ impl CarePlanContract {
             return Err(Error::Unauthorized);
         }
 
+        if barrier.resolved {
+            return Err(Error::BarrierAlreadyResolved);
+        }
+
         barrier.resolved = true;
-        barrier.resolution_notes = Some(resolution_notes);
+        barrier.resolution = Some(resolution);
+        barrier.resolution_date = Some(resolution_date);
         barrier.resolved_by = Some(provider_id.clone());
-        barrier.resolved_at = Some(env.ledger().timestamp());
+
         save_barrier(&env, &barrier);
 
         env.events().publish(
@@ -302,16 +361,17 @@ impl CarePlanContract {
         Ok(())
     }
 
-    /// Schedule a care plan review.
+    /// Schedule a review for a care plan.
     pub fn schedule_care_plan_review(
         env: Env,
         care_plan_id: u64,
         provider_id: Address,
         review_date: u64,
-    ) -> Result<(), Error> {
+        review_type: Symbol,
+    ) -> Result<u64, Error> {
         provider_id.require_auth();
 
-        let mut plan = load_care_plan(&env, care_plan_id).ok_or(Error::CarePlanNotFound)?;
+        let plan = load_care_plan(&env, care_plan_id).ok_or(Error::CarePlanNotFound)?;
         if !is_bound_to_plan(&env, &plan, &provider_id) {
             return Err(Error::Unauthorized);
         }
@@ -322,18 +382,153 @@ impl CarePlanContract {
             return Err(Error::CarePlanClosed);
         }
 
-        plan.next_review_date = review_date;
-        save_care_plan(&env, &plan);
+        let review_id = next_review_id(&env);
+
+        let review = CareReview {
+            review_id,
+            care_plan_id,
+            scheduled_by: provider_id.clone(),
+            review_date,
+            review_type,
+            conducted: false,
+            review_notes_hash: None,
+            plan_modifications: Vec::new(&env),
+            continue_plan: true,
+            conducted_by: None,
+            conducted_at: None,
+        };
+
+        save_review(&env, &review);
+        add_plan_review(&env, care_plan_id, review_id);
 
         env.events().publish(
-            (Symbol::new(&env, "care_plan_review_scheduled"),),
-            (care_plan_id, review_date),
+            (Symbol::new(&env, "review_scheduled"),),
+            (care_plan_id, review_id, review_date),
+        );
+
+        Ok(review_id)
+    }
+
+    /// Conduct a previously scheduled care plan review.
+    pub fn conduct_care_plan_review(
+        env: Env,
+        review_id: u64,
+        provider_id: Address,
+        review_notes_hash: BytesN<32>,
+        plan_modifications: Vec<String>,
+        continue_plan: bool,
+    ) -> Result<(), Error> {
+        provider_id.require_auth();
+
+        let mut review = load_review(&env, review_id).ok_or(Error::ReviewNotFound)?;
+        let mut plan = load_care_plan(&env, review.care_plan_id).ok_or(Error::CarePlanNotFound)?;
+        if !is_bound_to_plan(&env, &plan, &provider_id) {
+            return Err(Error::Unauthorized);
+        }
+
+        if review.conducted {
+            return Err(Error::ReviewAlreadyConducted);
+        }
+
+        let conducted_at = env.ledger().timestamp();
+
+        review.conducted = true;
+        review.review_notes_hash = Some(review_notes_hash);
+        review.plan_modifications = plan_modifications;
+        review.continue_plan = continue_plan;
+        review.conducted_by = Some(provider_id.clone());
+        review.conducted_at = Some(conducted_at);
+
+        // Update the parent care plan's last/next review dates
+        plan.last_review_date = Some(conducted_at);
+        plan.next_review_date = conducted_at + (plan.review_frequency_days as u64 * 86_400);
+
+        if !continue_plan {
+            plan.status = CarePlanStatus::Completed;
+        }
+
+        save_care_plan(&env, &plan);
+        save_review(&env, &review);
+
+        env.events().publish(
+            (Symbol::new(&env, "review_conducted"),),
+            (review_id, provider_id, continue_plan),
         );
 
         Ok(())
     }
 
-    /// Retrieve a summary of a care plan.
+    /// Assign a care team member to a care plan.
+    pub fn assign_care_team_member(
+        env: Env,
+        care_plan_id: u64,
+        coordinating_provider: Address,
+        team_member: Address,
+        role: Symbol,
+        responsibilities: Vec<String>,
+    ) -> Result<(), Error> {
+        coordinating_provider.require_auth();
+
+        let plan = load_care_plan(&env, care_plan_id).ok_or(Error::CarePlanNotFound)?;
+        if !is_bound_to_plan(&env, &plan, &coordinating_provider) {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut team = load_care_team(&env, care_plan_id);
+
+        let member = CareTeamMember {
+            care_plan_id,
+            team_member: team_member.clone(),
+            role,
+            responsibilities,
+            assigned_by: coordinating_provider.clone(),
+            assigned_at: env.ledger().timestamp(),
+        };
+
+        team.push_back(member);
+        save_care_team(&env, care_plan_id, &team);
+
+        env.events().publish(
+            (Symbol::new(&env, "team_member_assigned"),),
+            (care_plan_id, team_member),
+        );
+
+        Ok(())
+    }
+
+    /// Remove all care-plan state for a deregistered patient.
+    ///
+    /// Cancels every active care plan and removes the `PatientPlans` index.
+    /// Callable by the patient themselves.
+    pub fn deregister_patient(env: Env, patient_id: Address) {
+        patient_id.require_auth();
+
+        let plan_ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PatientPlans(patient_id.clone()))
+            .unwrap_or(Vec::new(&env));
+
+        for plan_id in plan_ids.iter() {
+            if let Some(mut plan) = load_care_plan(&env, plan_id) {
+                if matches!(plan.status, CarePlanStatus::Active) {
+                    plan.status = CarePlanStatus::Discontinued;
+                    save_care_plan(&env, &plan);
+                }
+            }
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PatientPlans(patient_id.clone()));
+
+        env.events().publish(
+            (Symbol::new(&env, "pat_dreg"), patient_id),
+            Symbol::new(&env, "cp_clean"),
+        );
+    }
+
+    /// Get a summary of a care plan.
     ///
     /// Access is restricted to the patient, the plan's provider, or an assigned
     /// care-team member, mirroring the authorization used by every mutating path.
@@ -349,24 +544,39 @@ impl CarePlanContract {
             return Err(Error::Unauthorized);
         }
 
-        let goals = load_plan_goals(&env, care_plan_id);
-        let interventions = load_plan_interventions(&env, care_plan_id);
-        let barriers = load_plan_barriers(&env, care_plan_id);
+        // Collect active goals
+        let goal_ids = load_plan_goals(&env, care_plan_id);
+        let mut active_goals: Vec<CareGoal> = Vec::new(&env);
+        for id in goal_ids.iter() {
+            if let Some(g) = load_goal(&env, id) {
+                if !matches!(g.status, GoalStatus::Achieved | GoalStatus::Discontinued) {
+                    active_goals.push_back(g);
+                }
+            }
+        }
+
+        // Collect interventions
+        let intervention_ids = load_plan_interventions(&env, care_plan_id);
+        let mut interventions: Vec<Intervention> = Vec::new(&env);
+        for id in intervention_ids.iter() {
+            if let Some(i) = load_intervention(&env, id) {
+                interventions.push_back(i);
+            }
+        }
+
         let care_team = load_care_team(&env, care_plan_id);
+        let barriers = load_plan_barriers(&env, care_plan_id);
 
         Ok(CarePlanSummary {
             care_plan_id,
             patient_id: plan.patient_id,
-            provider_id: plan.provider_id,
             plan_type: plan.plan_type,
-            conditions: plan.conditions,
-            goals,
+            active_goals,
             interventions,
-            barriers,
             care_team,
-            status: plan.status,
-            next_review_date: plan.next_review_date,
+            barriers,
             last_review_date: plan.last_review_date,
+            next_review_date: plan.next_review_date,
         })
     }
 }

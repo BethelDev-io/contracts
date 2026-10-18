@@ -1,7 +1,9 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{symbol_short, testutils::Address as _, Address, BytesN, Env, String};
+use soroban_sdk::{
+    symbol_short, testutils::Address as _, testutils::Ledger, Address, BytesN, Env, String,
+};
 
 fn setup() -> (Env, HealthcareAnalyticsClient<'static>, Address) {
     let env = Env::default();
@@ -958,7 +960,7 @@ fn test_cancel_report_queued() {
 
     // Cancelled job ID cannot be re-executed
     let next_job = client.execute_next_report(&admin);
-    assert_eq!(next_job, Ok(None));
+    assert_eq!(next_job, None);
 }
 
 #[test]
@@ -979,7 +981,7 @@ fn test_cancel_report_executing() {
     let job_id = accepted.job_id;
 
     // Start executing the job
-    let executed_id = client.execute_next_report(&admin).unwrap().unwrap();
+    let executed_id = client.execute_next_report(&admin).unwrap();
     assert_eq!(executed_id, job_id);
 
     // Executing job cancellation returns Error::JobAlreadyExecuting
@@ -1029,7 +1031,7 @@ fn test_execute_next_report_admin_succeeds() {
 
     // Admin call should succeed and return the job_id
     let result = client.execute_next_report(&admin);
-    assert_eq!(result, Ok(Some(accepted.job_id)));
+    assert_eq!(result, Some(accepted.job_id));
 }
 
 // ========================
@@ -1136,7 +1138,8 @@ fn test_expired_rotation_can_be_replaced_without_accept_attempt() {
     let replacement = Address::generate(&env);
 
     client.propose_admin_rotation(&admin, &typo);
-    env.ledger().set_timestamp(env.ledger().timestamp() + ADMIN_ROTATION_WINDOW + 1);
+    let now = env.ledger().timestamp();
+    env.ledger().with_mut(|l| l.timestamp = now + ADMIN_ROTATION_WINDOW + 1);
 
     client.propose_admin_rotation(&admin, &replacement);
     client.accept_admin_rotation(&replacement);

@@ -382,3 +382,12 @@ cargo test --test integration_tests
 
 <!-- handsoff-issue-860 -->
 - #860: [hai-tracking] record_patient_days lets any caller modify any case's denominator data
+
+<!-- handsoff-issue-939 -->
+- #939: [medical-claims] Still fails to compile on main — register_reviewer use-after-move (#868) is back
+
+<!-- handsoff-issue-940 -->
+- #940: [health-records] Test suite does not compile — 97 errors since nonce parameters were added (#776)
+
+<!-- handsoff-issue-941 -->
+- #941: [patient-registry] Test suite does not compile — 95 errors from nonce parameters added in #776
