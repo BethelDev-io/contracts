@@ -69,6 +69,35 @@ jobs:
       - name: cargo check lab-management (lib + tests)
         run: cargo check -p lab-management --tests
 
+  check-medical-device-tracking:
+    name: Check medical-device-tracking
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: cargo check medical-device-tracking (lib + tests)
+        run: cargo check -p medical-device-tracking --tests
+
   format:
     name: Format Check
     runs-on: ubuntu-latest
@@ -305,14 +334,16 @@ jobs:
     steps:
       - name: Check all jobs
         run: |
-          if [[ "${{ needs.format.result }}" != "success" ]] || \
+          if [[ "${{ needs.truncation-markers.result }}" != "success" ]] || \
+             [[ "${{ needs.format.result }}" != "success" ]] || \
              [[ "${{ needs.check.result }}" != "success" ]] || \
              [[ "${{ needs.check-lab-management.result }}" != "success" ]] || \
+             [[ "${{ needs.check-medical-device-tracking.result }}" != "success" ]] || \
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.test-access-control.result }}" != "success" ]] || \
              [[ "${{ needs.build-wasm.result }}" != "success" ]]; then
-            echo "One or more CI jobs failed"
+            echo "One or more required jobs failed"
             exit 1
           fi
-          echo "All CI jobs passed successfully"
+          echo "All required jobs passed"

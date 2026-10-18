@@ -246,25 +246,16 @@ impl AllergyManagement {
 
         let incident_id = incident_tracking::capture_incident(
             &env,
-            severity.clone(),
-            String::from_str(&env, "allergy-management"),
             error_code,
             description,
-            reporter.clone(),
-            None,
+            severity,
+            reporter,
         );
-
-        let severity_symbol = match severity {
-            incident_tracking::IncidentSeverity::Critical => symbol_short!("crit"),
-            incident_tracking::IncidentSeverity::High => symbol_short!("high"),
-            incident_tracking::IncidentSeverity::Medium => symbol_short!("med"),
-            incident_tracking::IncidentSeverity::Low => symbol_short!("low"),
-        };
 
         IncidentCaptured {
             version: EVENT_VERSION,
             incident_id,
-            severity: severity_symbol,
+            severity: severity_level,
             contract: String::from_str(&env, "allergy-management"),
         }
         .publish(&env);
@@ -272,14 +263,178 @@ impl AllergyManagement {
         Ok(incident_id)
     }
 
-    /// Update the severity of an existing allergy record.
-    ///
-    /// The caller must be a registered provider AND either the provider that
-    /// recorded the allergy or a provider the patient has granted access to.
+    /// Attach structured evidence to an existing incident
+    pub fn attach_incident_evidence(
+        env: Env,
+        incident_id: u64,
+        evidence_type: Symbol,
+        data: Bytes,
+        reporter: Address,
+    ) -> Result<(), Error> {
+        reporter.require_auth();
+        incident_tracking::attach_evidence(&env, incident_id, evidence_type, data, reporter);
+        Ok(())
+    }
+
+    /// Retrieve details for an incident
+    pub fn get_incident_details(
+        env: Env,
+        incident_id: u64,
+    ) -> Result<incident_tracking::Incident, Error> {
+        incident_tracking::get_incident(&env, incident_id).ok_or(Error::AllergyNotFound)
+    }
+
+    /// Resolve an incident
+    pub fn resolve_incident(
+        env: Env,
+        incident_id: u64,
+        resolver: Address,
+        resolution_notes: String,
+    ) -> Result<(), Error> {
+        resolver.require_auth();
+        incident_tracking::resolve_incident(&env, incident_id, resolver, resolution_notes);
+        Ok(())
+    }
+
+    /// Check whether a drug interacts with any of a patient's active allergies
+    pub fn check_drug_allergy_interaction(
+        env: Env,
+        patient_id: Address,
+        drug_name: String,
+    ) -> Result<bool, Error> {
+        let allergy_ids = storage::get_patient_allergies(&env, &patient_id);
+        for allergy_id in allergy_ids.iter() {
+            if let Ok(allergy) = storage::get_allergy(&env, allergy_id) {
+                if allergy.status == AllergyStatus::Active
+                    && allergy.allergen == drug_name
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Get all active allergies for a patient
+    pub fn get_active_allergies(
+        env: Env,
+        patient_id: Address,
+        requester: Address,
+    ) -> Result<Vec<AllergyRecord>, Error> {
+        requester.require_auth();
+        if !storage::check_access_permission(&env, &patient_id, &requester) {
+            return Err(Error::AccessDenied);
+        }
+        let allergy_ids = storage::get_patient_allergies(&env, &patient_id);
+        let mut result = Vec::new(&env);
+        for allergy_id in allergy_ids.iter() {
+            if let Ok(allergy) = storage::get_allergy(&env, allergy_id) {
+                if allergy.status == AllergyStatus::Active {
+                    result.push_back(allergy);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Get all allergies (any status) for a patient
+    pub fn get_all_allergies(
+        env: Env,
+        patient_id: Address,
+        requester: Address,
+    ) -> Result<Vec<AllergyRecord>, Error> {
+        requester.require_auth();
+        if !storage::check_access_permission(&env, &patient_id, &requester) {
+            return Err(Error::AccessDenied);
+        }
+        let allergy_ids = storage::get_patient_allergies(&env, &patient_id);
+        let mut result = Vec::new(&env);
+        for allergy_id in allergy_ids.iter() {
+            if let Ok(allergy) = storage::get_allergy(&env, allergy_id) {
+                result.push_back(allergy);
+            }
+        }
+        Ok(result)
+    }
+
+    /// Retrieve a single allergy record by ID
+    pub fn get_allergy(
+        env: Env,
+        allergy_id: u64,
+        requester: Address,
+    ) -> Result<AllergyRecord, Error> {
+        requester.require_auth();
+        let allergy = storage::get_allergy(&env, allergy_id)?;
+        if !storage::check_access_permission(&env, &allergy.patient_id, &requester) {
+            return Err(Error::AccessDenied);
+        }
+        Ok(allergy)
+    }
+
+    /// Grant a provider access to a patient's allergy records
+    pub fn grant_access(
+        env: Env,
+        patient_id: Address,
+        provider_id: Address,
+    ) -> Result<(), Error> {
+        patient_id.require_auth();
+        storage::grant_access(&env, &patient_id, &provider_id);
+        AccessGranted {
+            version: EVENT_VERSION,
+            patient_id,
+            provider_id,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Revoke a provider's access to a patient's allergy records
+    pub fn revoke_access(
+        env: Env,
+        patient_id: Address,
+        provider_id: Address,
+    ) -> Result<(), Error> {
+        patient_id.require_auth();
+        storage::revoke_access(&env, &patient_id, &provider_id);
+        AccessRevoked {
+            version: EVENT_VERSION,
+            patient_id,
+            provider_id,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Deregister a patient, marking all allergies as deleted and clearing access grants
+    pub fn deregister_patient(
+        env: Env,
+        patient_id: Address,
+        requester: Address,
+    ) -> Result<(), Error> {
+        requester.require_auth();
+        if requester != patient_id {
+            let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+            if requester != admin {
+                return Err(Error::Unauthorized);
+            }
+        }
+        let allergy_ids = storage::get_patient_allergies(&env, &patient_id);
+        for allergy_id in allergy_ids.iter() {
+            if let Ok(mut allergy) = storage::get_allergy(&env, allergy_id) {
+                allergy.status = AllergyStatus::Deleted;
+                storage::save_allergy(&env, &allergy);
+            }
+        }
+        storage::remove_patient_allergies(&env, &patient_id);
+        storage::clear_access_grants(&env, &patient_id);
+        Ok(())
+    }
+
+    /// Update the severity of an existing allergy record
     pub fn update_allergy_severity(
         env: Env,
-        provider_id: Address,
         allergy_id: u64,
+        provider_id: Address,
         new_severity: Symbol,
         reason: String,
     ) -> Result<(), Error> {
@@ -291,23 +446,24 @@ impl AllergyManagement {
 
         validation::validate_severity(&new_severity)?;
 
-        let mut allergy = storage::get_allergy(&env, allergy_id).ok_or(Error::AllergyNotFound)?;
+        let mut allergy = storage::get_allergy(&env, allergy_id)?;
 
-        // Enforce patient-scoped access: only the recording provider or a provider
-        // the patient has granted access to may mutate this record.
+        // #847 – only the recording provider or a patient-granted provider may mutate
         Self::require_allergy_access(&env, &allergy, &provider_id)?;
 
-        let previous_severity = allergy.severity.clone();
-        allergy.severity = new_severity.clone();
+        if allergy.status == AllergyStatus::Resolved {
+            return Err(Error::AlreadyResolved);
+        }
 
-        let history_entry = SeverityHistoryEntry {
-            previous_severity,
+        let update = SeverityUpdate {
+            previous_severity: allergy.severity.clone(),
             new_severity: new_severity.clone(),
-            changed_by: provider_id.clone(),
-            changed_at: env.ledger().timestamp(),
+            updated_by: provider_id.clone(),
+            updated_at: env.ledger().timestamp(),
             reason,
         };
-        allergy.severity_history.push_back(history_entry);
+        allergy.severity_history.push_back(update);
+        allergy.severity = new_severity.clone();
 
         storage::save_allergy(&env, &allergy);
 
@@ -321,14 +477,11 @@ impl AllergyManagement {
         Ok(())
     }
 
-    /// Mark an allergy as resolved.
-    ///
-    /// The caller must be a registered provider AND either the provider that
-    /// recorded the allergy or a provider the patient has granted access to.
+    /// Resolve an allergy record
     pub fn resolve_allergy(
         env: Env,
-        provider_id: Address,
         allergy_id: u64,
+        provider_id: Address,
         resolution_reason: String,
     ) -> Result<(), Error> {
         provider_id.require_auth();
@@ -337,18 +490,18 @@ impl AllergyManagement {
             return Err(Error::Unauthorized);
         }
 
-        let mut allergy = storage::get_allergy(&env, allergy_id).ok_or(Error::AllergyNotFound)?;
+        let mut allergy = storage::get_allergy(&env, allergy_id)?;
+
+        // #847 – only the recording provider or a patient-granted provider may resolve
+        Self::require_allergy_access(&env, &allergy, &provider_id)?;
 
         if allergy.status == AllergyStatus::Resolved {
             return Err(Error::AlreadyResolved);
         }
 
-        // Enforce patient-scoped access: only the recording provider or a provider
-        // the patient has granted access to may resolve this record.
-        Self::require_allergy_access(&env, &allergy, &provider_id)?;
-
+        let now = env.ledger().timestamp();
         allergy.status = AllergyStatus::Resolved;
-        allergy.resolution_date = Some(env.ledger().timestamp());
+        allergy.resolution_date = Some(now);
         allergy.resolution_reason = Some(resolution_reason);
 
         storage::save_allergy(&env, &allergy);
@@ -356,10 +509,13 @@ impl AllergyManagement {
         AllergyResolved {
             version: EVENT_VERSION,
             allergy_id,
-            resolution_date: env.ledger().timestamp(),
+            resolution_date: now,
         }
         .publish(&env);
 
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod test;

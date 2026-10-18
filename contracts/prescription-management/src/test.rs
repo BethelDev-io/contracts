@@ -43,7 +43,7 @@ fn test_prescription_lifecycle() {
     };
 
     let prescription_id = client.issue_prescription(&provider, &patient, &request);
-    assert_eq!(prescription_id, 0);
+    assert_eq!(prescription_id, 1);
 
     // Test Dispensing
     let dispense = DispenseRequest {

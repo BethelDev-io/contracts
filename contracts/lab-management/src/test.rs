@@ -45,7 +45,7 @@ fn setup_env_with_registered_provider()
     // Register the lab-management contract, pointing it at the registry
     let contract_id = env.register(LabManagementContract, ());
     let client = LabManagementContractClient::new(&env, &contract_id);
-    client.initialize(&provider_registry_id);
+    client.initialize(&admin, &provider_registry_id);
 
     // Register the provider that will place lab orders
     let provider = Address::generate(&env);
@@ -78,7 +78,7 @@ fn setup_registered_provider(
     let admin = Address::generate(env);
     pr_client.initialize(&admin);
 
-    client.initialize(&provider_registry_id);
+    client.initialize(&admin, &provider_registry_id);
 
     let provider = Address::generate(env);
     pr_client.register_provider(
@@ -416,7 +416,7 @@ fn test_provider_registration_verification() {
     // Register LabManagementContract and initialize it with ProviderRegistry
     let lab_contract_id = env.register(LabManagementContract, ());
     let client = LabManagementContractClient::new(&env, &lab_contract_id);
-    client.initialize(&provider_registry_id);
+    client.initialize(&admin, &provider_registry_id);
 
     let unregistered_provider = Address::generate(&env);
     let registered_provider = Address::generate(&env);
@@ -502,7 +502,7 @@ fn test_order_lab_test_rejects_unregistered_provider() {
     // Deploy the lab-management contract and wire it to the registry.
     let contract_id = env.register(LabManagementContract, ());
     let client = LabManagementContractClient::new(&env, &contract_id);
-    client.initialize(&provider_registry_id);
+    client.initialize(&admin, &provider_registry_id);
 
     let unregistered_provider = Address::generate(&env);
     let patient = Address::generate(&env);
@@ -512,5 +512,56 @@ fn test_order_lab_test_rejects_unregistered_provider() {
     assert_eq!(
         res.err().expect("expected ProviderNotRegistered error"),
         Ok(Error::ProviderNotRegistered),
+    );
+}
+
+// ── regression: #931 submit_results must complete the order ──────────────────
+
+/// Regression test for #931: `lib.rs` was truncated inside the lab-result
+/// flow. Submitting results as the assigned lab must persist the results
+/// hash and QC flag and move the order to the "Completed" state.
+#[test]
+fn test_submit_results_by_assigned_lab_completes_order() {
+    let (env, client, provider, patient) = setup_env_with_registered_provider();
+
+    let lab = Address::generate(&env);
+    let results_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+    let order_id = client.order_lab_test(&provider, &patient, &make_req(&env));
+    client.assign_lab(&order_id, &lab, &3600);
+
+    client.submit_results(
+        &order_id,
+        &lab,
+        &results_hash,
+        &vec![&env, make_result(&env)],
+        &true,
+    );
+
+    let order: LabOrder = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LabOrder(order_id))
+            .unwrap()
+    });
+    assert_eq!(order.status, Symbol::new(&env, "Completed"));
+    assert_eq!(order.lab_id, Some(lab));
+    assert_eq!(order.results_hash, Some(results_hash));
+    assert!(order.quality_control_passed);
+}
+
+// ── regression: #873 initialize is one-time ──────────────────────────────────
+
+#[test]
+fn test_initialize_twice_returns_already_initialized() {
+    let (env, client, _provider, _patient) = setup_env_with_registered_provider();
+
+    let attacker = Address::generate(&env);
+    let rogue_registry = Address::generate(&env);
+
+    let res = client.try_initialize(&attacker, &rogue_registry);
+    assert_eq!(
+        res.err().expect("expected AlreadyInitialized error"),
+        Ok(Error::AlreadyInitialized),
     );
 }

@@ -265,6 +265,11 @@ impl LabManagementContract {
         // 2. Verify the caller is the assigned lab.
         if order.lab_id != Some(lab_id.clone()) {
             return Err(Error::Unauthorized);
-      
+        }
 
-/* … truncated 142 chars — edit only what you need near the top … */
+        env.events()
+            .publish((Symbol::new(&env, "CRITICAL"), order_id), (test_code, val));
+        Ok(())
+    }
+}
+mod test;
