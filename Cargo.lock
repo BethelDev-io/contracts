@@ -328,6 +328,8 @@ dependencies = [
 name = "clinical-guideline"
 version = "0.1.0"
 dependencies = [
+ "provider-registry",
+ "shared",
  "soroban-sdk",
 ]
 

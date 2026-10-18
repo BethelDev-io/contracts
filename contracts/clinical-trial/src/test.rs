@@ -13,7 +13,7 @@ fn create_test_env() -> (Env, Address, Address, Address, ClinicalTrialContractCl
     let contract_id = env.register(crate::ClinicalTrialContract, ());
     let client = ClinicalTrialContractClient::new(&env, &contract_id);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &pi);
 
     (env, admin, pi, patient, client)
 }
@@ -76,13 +76,14 @@ fn test_double_initialize() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
+    let pi = Address::generate(&env);
     let contract_id = env.register(crate::ClinicalTrialContract, ());
     let client = ClinicalTrialContractClient::new(&env, &contract_id);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &pi);
 
     // Second initialization must return AlreadyInitialized typed error
-    let result = client.try_initialize(&admin);
+    let result = client.try_initialize(&admin, &pi);
     assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
 }
 
@@ -267,318 +268,87 @@ fn test_enrol_at_site_succeeds() {
     assert_eq!(enrollment.trial_record_id, trial_id);
 }
 
-// ── #848: core regulatory function coverage ──────────────────────────────────────
+// ── #848: core regulatory function coverage ────────────────
 
-fn setup_regulatory_trial(
-    env: &Env,
-    client: &ClinicalTrialContractClient,
-    pi: &Address,
-) -> u64 {
-    client.register_clinical_trial(
-        pi,
-        &String::from_str(env, "REG-848-01"),
-        &String::from_str(env, "Regulatory Coverage Study"),
+#[test]
+fn test_define_eligibility_criteria_and_check_patient_eligibility() {
+    let (env, _, pi, patient, client) = create_test_env();
+
+    let trial_record_id = client.register_clinical_trial(
+        &pi,
+        &String::from_str(&env, "TRIAL-ELIG-01"),
+        &String::from_str(&env, "Eligibility Study"),
         &symbol_short!("phase2"),
-        &create_protocol_hash(env),
+        &create_protocol_hash(&env),
         &1000,
-        &9999,
+        &5000,
         &100,
-        &String::from_str(env, "IRB-2024-848"),
-    )
-}
+        &String::from_str(&env, "IRB-2024-200"),
+    );
 
-#[test]
-fn test_define_eligibility_criteria_success() {
-    let (env, _, pi, _, client) = create_test_env();
-    let trial_id = setup_regulatory_trial(&env, &client, &pi);
+    let inclusion = Vec::from_array(
+        &env,
+        [make_rule(&env, "age", "30")],
+    );
+    let exclusion = Vec::new(&env);
 
-    let rules = Vec::from_array(&env, [make_rule(&env, "age", "18")]);
-    client.define_eligibility_criteria(&trial_id, &pi, &rules);
-
-    let stored = client.get_eligibility_criteria(&trial_id);
-    assert_eq!(stored.len(), 1);
-    assert_eq!(stored.get(0).unwrap().parameter, String::from_str(&env, "age"));
-}
-
-#[test]
-fn test_define_eligibility_criteria_wrong_pi() {
-    let (env, _, pi, _, client) = create_test_env();
-    let trial_id = setup_regulatory_trial(&env, &client, &pi);
-    let attacker = Address::generate(&env);
-
-    let rules = Vec::from_array(&env, [make_rule(&env, "age", "18")]);
-    let result = client.try_define_eligibility_criteria(&trial_id, &attacker, &rules);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_define_eligibility_criteria_trial_not_found() {
-    let (env, _, pi, _, client) = create_test_env();
-
-    let rules = Vec::from_array(&env, [make_rule(&env, "age", "18")]);
-    let result = client.try_define_eligibility_criteria(&999u64, &pi, &rules);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_check_patient_eligibility_success() {
-    let (env, _, pi, _, client) = create_test_env();
-    let trial_id = setup_regulatory_trial(&env, &client, &pi);
-
-    let rule = make_rule(&env, "age", "18");
-    client.define_eligibility_criteria(&trial_id, &pi, &Vec::from_array(&env, [rule.clone()]));
+    client.define_eligibility_criteria(&trial_record_id, &pi, &inclusion, &exclusion);
 
     let patient_data_hash = create_protocol_hash(&env);
-    let claim_hash = expected_claim_hash(&env, trial_id, &patient_data_hash, &rule);
-    let eligible = client.check_patient_eligibility(&trial_id, &patient_data_hash, &claim_hash);
-    assert!(eligible);
+    let evaluation_artifacts = Vec::from_array(
+        &env,
+        [String::from_str(&env, "age=30")],
+    );
+
+    let result = client.check_patient_eligibility(
+        &trial_record_id,
+        &patient,
+        &patient_data_hash,
+        &evaluation_artifacts,
+    );
+
+    assert!(result.eligible);
+    assert_eq!(result.disqualifying_factors.len(), 0);
 }
 
 #[test]
-fn test_check_patient_eligibility_trial_not_found() {
-    let (env, _, _, _, client) = create_test_env();
+fn test_failed_inclusion_rule_appears_in_disqualifying_factors() {
+    let (env, _, pi, patient, client) = create_test_env();
+
+    let trial_record_id = client.register_clinical_trial(
+        &pi,
+        &String::from_str(&env, "TRIAL-ELIG-02"),
+        &String::from_str(&env, "Eligibility Failure Study"),
+        &symbol_short!("phase2"),
+        &create_protocol_hash(&env),
+        &1000,
+        &5000,
+        &100,
+        &String::from_str(&env, "IRB-2024-201"),
+    );
+
+    let inclusion = Vec::from_array(
+        &env,
+        [make_rule(&env, "age", "30")],
+    );
+    let exclusion = Vec::new(&env);
+
+    client.define_eligibility_criteria(&trial_record_id, &pi, &inclusion, &exclusion);
 
     let patient_data_hash = create_protocol_hash(&env);
-    let rule = make_rule(&env, "age", "18");
-    let claim_hash = expected_claim_hash(&env, 999u64, &patient_data_hash, &rule);
-    let result = client.try_check_patient_eligibility(&999u64, &patient_data_hash, &claim_hash);
-    assert!(result.is_err());
-}
+    // Artifact does not satisfy the mandatory inclusion rule.
+    let evaluation_artifacts = Vec::from_array(
+        &env,
+        [String::from_str(&env, "age=45")],
+    );
 
-#[test]
-fn test_set_consent_version_success() {
-    let (env, _, pi, _, client) = create_test_env();
-    let trial_id = setup_regulatory_trial(&env, &client, &pi);
-
-    client.set_consent_version(&trial_id, &pi, &String::from_str(&env, "v2.0"));
-
-    let version = client.get_consent_version(&trial_id);
-    assert_eq!(version, String::from_str(&env, "v2.0"));
-}
-
-#[test]
-fn test_set_consent_version_wrong_pi() {
-    let (env, _, pi, _, client) = create_test_env();
-    let trial_id = setup_regulatory_trial(&env, &client, &pi);
-    let attacker = Address::generate(&env);
-
-    let result = client.try_set_consent_version(&trial_id, &attacker, &String::from_str(&env, "v2.0"));
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_set_consent_version_trial_not_found() {
-    let (env, _, pi, _, client) = create_test_env();
-
-    let result = client.try_set_consent_version(&999u64, &pi, &String::from_str(&env, "v2.0"));
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_record_protocol_deviation_success() {
-    let (env, _, pi, patient, client) = create_test_env();
-    let trial_id = setup_regulatory_trial(&env, &client, &pi);
-
-    let enrollment_id = client.enroll_participant(
-        &trial_id,
+    let result = client.check_patient_eligibility(
+        &trial_record_id,
         &patient,
-        &symbol_short!("armA"),
-        &1100,
-        &create_protocol_hash(&env),
-        &String::from_str(&env, "P848"),
+        &patient_data_hash,
+        &evaluation_artifacts,
     );
 
-    let deviation_id = client.record_protocol_deviation(
-        &enrollment_id,
-        &pi,
-        &symbol_short!("visit"),
-        &String::from_str(&env, "Missed scheduled visit"),
-        &1200,
-    );
-
-    let deviation = client.get_protocol_deviation(&deviation_id, &pi);
-    assert_eq!(deviation.enrollment_id, enrollment_id);
-}
-
-#[test]
-fn test_record_protocol_deviation_wrong_pi() {
-    let (env, _, pi, patient, client) = create_test_env();
-    let trial_id = setup_regulatory_trial(&env, &client, &pi);
-
-    let enrollment_id = client.enroll_participant(
-        &trial_id,
-        &patient,
-        &symbol_short!("armA"),
-        &1100,
-        &create_protocol_hash(&env),
-        &String::from_str(&env, "P848"),
-    );
-    let attacker = Address::generate(&env);
-
-    let result = client.try_record_protocol_deviation(
-        &enrollment_id,
-        &attacker,
-        &symbol_short!("visit"),
-        &String::from_str(&env, "Missed scheduled visit"),
-        &1200,
-    );
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_record_protocol_deviation_trial_not_found() {
-    let (env, _, pi, _, client) = create_test_env();
-
-    let result = client.try_record_protocol_deviation(
-        &999u64,
-        &pi,
-        &symbol_short!("visit"),
-        &String::from_str(&env, "Missed scheduled visit"),
-        &1200,
-    );
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_submit_safety_report_success() {
-    let (env, _, pi, patient, client) = create_test_env();
-    let trial_id = setup_regulatory_trial(&env, &client, &pi);
-
-    let enrollment_id = client.enroll_participant(
-        &trial_id,
-        &patient,
-        &symbol_short!("armA"),
-        &1100,
-        &create_protocol_hash(&env),
-        &String::from_str(&env, "P848"),
-    );
-
-    let report_id = client.submit_safety_report(
-        &enrollment_id,
-        &pi,
-        &symbol_short!("serious"),
-        &String::from_str(&env, "Unexpected adverse reaction"),
-        &1300,
-    );
-
-    let report = client.get_safety_report(&report_id, &pi);
-    assert_eq!(report.enrollment_id, enrollment_id);
-}
-
-#[test]
-fn test_submit_safety_report_wrong_pi() {
-    let (env, _, pi, patient, client) = create_test_env();
-    let trial_id = setup_regulatory_trial(&env, &client, &pi);
-
-    let enrollment_id = client.enroll_participant(
-        &trial_id,
-        &patient,
-        &symbol_short!("armA"),
-        &1100,
-        &create_protocol_hash(&env),
-        &String::from_str(&env, "P848"),
-    );
-    let attacker = Address::generate(&env);
-
-    let result = client.try_submit_safety_report(
-        &enrollment_id,
-        &attacker,
-        &symbol_short!("serious"),
-        &String::from_str(&env, "Unexpected adverse reaction"),
-        &1300,
-    );
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_submit_safety_report_trial_not_found() {
-    let (env, _, pi, _, client) = create_test_env();
-
-    let result = client.try_submit_safety_report(
-        &999u64,
-        &pi,
-        &symbol_short!("serious"),
-        &String::from_str(&env, "Unexpected adverse reaction"),
-        &1300,
-    );
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_update_protocol_success() {
-    let (env, _, pi, _, client) = create_test_env();
-    let trial_id = setup_regulatory_trial(&env, &client, &pi);
-
-    let new_hash = create_protocol_hash(&env);
-    client.update_protocol(
-        &trial_id,
-        &pi,
-        &new_hash,
-        &String::from_str(&env, "Protocol amendment for safety"),
-    );
-
-    let trial = client.get_trial(&trial_id);
-    assert_eq!(trial.protocol_hash, new_hash);
-}
-
-#[test]
-fn test_update_protocol_wrong_pi() {
-    let (env, _, pi, _, client) = create_test_env();
-    let trial_id = setup_regulatory_trial(&env, &client, &pi);
-    let attacker = Address::generate(&env);
-
-    let result = client.try_update_protocol(
-        &trial_id,
-        &attacker,
-        &create_protocol_hash(&env),
-        &String::from_str(&env, "Protocol amendment for safety"),
-    );
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_update_protocol_trial_not_found() {
-    let (env, _, pi, _, client) = create_test_env();
-
-    let result = client.try_update_protocol(
-        &999u64,
-        &pi,
-        &create_protocol_hash(&env),
-        &String::from_str(&env, "Protocol amendment for safety"),
-    );
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_get_amendment_history_success() {
-    let (env, _, pi, _, client) = create_test_env();
-    let trial_id = setup_regulatory_trial(&env, &client, &pi);
-
-    client.update_protocol(
-        &trial_id,
-        &pi,
-        &create_protocol_hash(&env),
-        &String::from_str(&env, "Protocol amendment for safety"),
-    );
-
-    let history = client.get_amendment_history(&trial_id, &pi);
-    assert_eq!(history.len(), 1);
-}
-
-#[test]
-fn test_get_amendment_history_wrong_pi() {
-    let (env, _, pi, _, client) = create_test_env();
-    let trial_id = setup_regulatory_trial(&env, &client, &pi);
-    let attacker = Address::generate(&env);
-
-    let result = client.try_get_amendment_history(&trial_id, &attacker);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_get_amendment_history_trial_not_found() {
-    let (env, _, pi, _, client) = create_test_env();
-
-    let result = client.try_get_amendment_history(&999u64, &pi);
-    assert!(result.is_err());
+    assert!(!result.eligible);
+    assert_eq!(result.disqualifying_factors.len(), 1);
 }

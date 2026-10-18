@@ -1175,7 +1175,7 @@ fn test_create_template_and_issue_prescription_independently() {
     // Prescription ids start at 1
     assert_eq!(rx_id, 1);
 
-    // Verify the prescription was stored independently
+    // Verify the prescription was stored under the namespaced key
     let stored: Prescription = env.as_contract(&contract_id, || {
         env.storage()
             .persistent()

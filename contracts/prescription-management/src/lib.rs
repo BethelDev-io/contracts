@@ -30,6 +30,7 @@ use soroban_sdk::{
     Address, BytesN, Env, String, Symbol, Vec, contract, contractclient, contracterror,
     contractimpl, contracttype,
 };
+use ttl_config::extend_critical_ttl;
 
 // ── Allergy-management client ─────────────────────────────────────────────────
 
@@ -1868,6 +1869,52 @@ impl PrescriptionContract {
     pub fn get_caller_nonce(env: Env, caller: Address) -> u64 {
         let nonce_key = DataKey::CallerNonce(caller);
         env.storage().persistent().get(&nonce_key).unwrap_or(0)
+    }
+
+    /// One-off migration: re-key existing prescription records from the legacy
+    /// raw `u64` key (`0, 1, 2, …`) to the namespaced `DataKey::Prescription(id)`
+    /// key introduced by issue #956.
+    ///
+    /// Call this once after upgrading the contract WASM. Pass the first legacy
+    /// ID (inclusive) and the exclusive upper bound (the value the old `RxCounter`
+    /// held before the upgrade — i.e., the next ID that *would* have been issued).
+    ///
+    /// Safe to call multiple times: IDs that are already stored under the new
+    /// key, or that have no record under the old key, are silently skipped.
+    /// Requires admin authorization.
+    pub fn migrate_rx_keys(
+        env: Env,
+        admin: Address,
+        from_id: u64,
+        exclusive_upper: u64,
+    ) -> Result<u32, Error> {
+        admin.require_auth();
+        let configured: Option<Address> = env.storage().persistent().get(&DataKey::Admin);
+        if configured.as_ref().map_or(true, |a| *a != admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut migrated: u32 = 0;
+        let mut id = from_id;
+        while id < exclusive_upper {
+            // Skip if already under the new key
+            let new_key = DataKey::Prescription(id);
+            if !env.storage().persistent().has(&new_key) {
+                // Try to read from the legacy raw-u64 key
+                if let Some(prescription) = env
+                    .storage()
+                    .persistent()
+                    .get::<u64, Prescription>(&id)
+                {
+                    env.storage().persistent().set(&new_key, &prescription);
+                    extend_critical_ttl(&env, &new_key);
+                    migrated += 1;
+                }
+            }
+            id += 1;
+        }
+
+        Ok(migrated)
     }
 }
 
