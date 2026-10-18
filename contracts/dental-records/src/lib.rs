@@ -34,6 +34,9 @@ use shared_contracts::safe_increment;
 mod types;
 use types::*;
 
+#[cfg(test)]
+mod test;
+
 /// --------------------
 /// Events
 /// --------------------
@@ -275,35 +278,31 @@ impl DentalRecordsContract {
         Ok(())
     }
 
-    pub fn record_dental_radiograph(
+    pub fn record_radiograph(
         env: Env,
         patient_id: Address,
-        image_type: Symbol, // bitewing, periapical, panoramic, cbct
-        image_date: u64,
-        teeth_included: Vec<String>,
-        findings: Vec<String>,
+        dentist_id: Address,
+        radiograph_type: Symbol, // periapical, bitewing, panoramic, cbct
+        taken_date: u64,
+        findings: String,
         image_hash: BytesN<32>,
     ) -> Result<u64, Error> {
-        patient_id.require_auth();
-
-        // #215 – image_date is when the X-ray was taken; it must not be future
-        temporal::not_future(&env, image_date)
-            .map_err(|_| Error::InvalidPastDate)?;
+        dentist_id.require_auth();
 
         let count = safe_increment(&env, &DataKey::RadiographCount);
 
-        let radio = Radiograph {
+        let radiograph = Radiograph {
             patient_id,
-            image_type,
-            image_date,
-            teeth_included,
+            dentist_id,
+            radiograph_type,
+            taken_date,
             findings,
             image_hash,
         };
 
         env.storage()
             .persistent()
-            .set(&DataKey::Radio(count), &radio);
+            .set(&DataKey::Radiograph(count), &radiograph);
 
         RadiographRecorded {
             version: EVENT_VERSION,
@@ -313,118 +312,4 @@ impl DentalRecordsContract {
 
         Ok(count)
     }
-
-    pub fn track_orthodontic_treatment(
-        env: Env,
-        patient_id: Address,
-        orthodontist_id: Address,
-        treatment_start_date: u64,
-        appliance_type: Symbol,
-        treatment_plan_hash: BytesN<32>,
-        estimated_duration_months: u32,
-    ) -> Result<u64, Error> {
-        patient_id.require_auth();
-        orthodontist_id.require_auth();
-
-        let count = safe_increment(&env, &DataKey::OrthoCount);
-
-        let ortho = OrthodonticTreatment {
-            patient_id,
-            orthodontist_id,
-            treatment_start_date,
-            appliance_type,
-            treatment_plan_hash,
-            estimated_duration_months,
-        };
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::Ortho(count), &ortho);
-
-        Ok(count)
-    }
-
-    pub fn record_ortho_adjustment(
-        env: Env,
-        ortho_treatment_id: u64,
-        adjustment_date: u64,
-        adjustments_made: Vec<String>,
-        arch_wire_change: bool,
-        next_appointment_weeks: u32,
-    ) -> Result<(), Error> {
-        let ortho: OrthodonticTreatment = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Ortho(ortho_treatment_id))
-            .ok_or(Error::NotFound)?;
-        ortho.orthodontist_id.require_auth();
-
-        let adj = OrthoAdjustment {
-            adjustment_date,
-            adjustments_made,
-            arch_wire_change,
-            next_appointment_weeks,
-        };
-
-        env.storage().persistent().set(
-            &DataKey::OrthoAdj(ortho_treatment_id, adjustment_date),
-            &adj,
-        );
-
-        Ok(())
-    }
-
-    pub fn prescribe_dental_medication(
-        env: Env,
-        patient_id: Address,
-        dentist_id: Address,
-        medication: String,
-        indication: String,
-        dosage_instructions: String,
-    ) -> Result<u64, Error> {
-        dentist_id.require_auth();
-        patient_id.require_auth();
-
-        let count = safe_increment(&env, &DataKey::RxCount);
-
-        let rx = MedicationPrescription {
-            patient_id,
-            dentist_id,
-            medication,
-            indication,
-            dosage_instructions,
-        };
-
-        env.storage().persistent().set(&DataKey::Rx(count), &rx);
-
-        Ok(count)
-    }
-
-    pub fn document_informed_consent_dental(
-        env: Env,
-        patient_id: Address,
-        procedure: String,
-        risks_disclosed: Vec<String>,
-        alternatives_discussed: Vec<String>,
-        consent_date: u64,
-        consent_document_hash: BytesN<32>,
-    ) -> Result<(), Error> {
-        patient_id.require_auth();
-
-        let consent = InformedConsent {
-            procedure,
-            risks_disclosed,
-            alternatives_discussed,
-            consent_date,
-            consent_document_hash: consent_document_hash.clone(),
-        };
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::Consent(consent_document_hash), &consent);
-
-        Ok(())
-    }
 }
-
-mod test;
