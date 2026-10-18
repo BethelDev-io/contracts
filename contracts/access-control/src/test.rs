@@ -3,7 +3,7 @@
 use super::*;
 use proptest::prelude::*;
 use soroban_sdk::{
-    testutils::{Address as _, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
     xdr::ToXdr,
     Address, Bytes, BytesN, Env, IntoVal, String,
 };
@@ -273,8 +273,6 @@ fn test_commit_reveal_replay_rejected() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_check_access_expired() {
-    use soroban_sdk::testutils::Ledger;
-
     let (env, client) = setup();
     let admin = Address::generate(&env);
     let (hospital, doctor) = register_two(&env, &client, &admin);
@@ -284,7 +282,7 @@ fn test_check_access_expired() {
 
     assert!(client.check_access(&doctor, &resource_id));
 
-    env.ledger().set_timestamp(200);
+    env.ledger().with_mut(|l| l.timestamp = 200);
     assert!(!client.check_access(&doctor, &resource_id));
 }
 
@@ -715,8 +713,6 @@ fn test_revoke_role_non_admin_rejected() {
 
 #[test]
 fn test_role_expires() {
-    use soroban_sdk::testutils::Ledger;
-
     let env = Env::default();
     env.mock_all_auths();
     let (admin, client) = setup_rbac(&env);
@@ -727,14 +723,12 @@ fn test_role_expires() {
     assert!(client.has_role(&reviewer, &Role::PayerReviewer));
 
     // Advance past expiry.
-    env.ledger().set_timestamp(200);
+    env.ledger().with_mut(|l| l.timestamp = 200);
     assert!(!client.has_role(&reviewer, &Role::PayerReviewer));
 }
 
 #[test]
 fn test_expired_role_can_be_regranted() {
-    use soroban_sdk::testutils::Ledger;
-
     let env = Env::default();
     env.mock_all_auths();
     let (admin, client) = setup_rbac(&env);
@@ -742,7 +736,7 @@ fn test_expired_role_can_be_regranted() {
     let reviewer = Address::generate(&env);
     client.grant_role(&admin, &reviewer, &Role::PayerReviewer, &100);
 
-    env.ledger().set_timestamp(200);
+    env.ledger().with_mut(|l| l.timestamp = 200);
     // Expired — re-grant should succeed.
     client.grant_role(&admin, &reviewer, &Role::PayerReviewer, &0);
     assert!(client.has_role(&reviewer, &Role::PayerReviewer));
@@ -960,7 +954,7 @@ proptest! {
         let resource = String::from_str(&env, &resource_id);
         client.grant_access(&grantor, &grantee, &resource, &expires_at, &None);
 
-        env.ledger().set_timestamp(expires_at + 1);
+        env.ledger().with_mut(|l| l.timestamp = expires_at + 1);
         assert!(!client.check_access(&grantee, &resource));
     }
 
@@ -1009,7 +1003,7 @@ fn make_justification(env: &Env) -> BytesN<32> {
 fn test_emergency_access_granted_and_active() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_000);
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (_admin, responder, patient, client) = setup_emergency(&env);
     let justification = make_justification(&env);
@@ -1025,13 +1019,13 @@ fn test_emergency_access_granted_and_active() {
 fn test_emergency_access_expires_after_one_hour() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_000);
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (_admin, responder, patient, client) = setup_emergency(&env);
     client.emergency_access(&responder, &patient, &make_justification(&env));
 
     // Advance ledger time past 1 hour (3600s)
-    env.ledger().set_timestamp(1_000 + 3601);
+    env.ledger().with_mut(|l| l.timestamp = 1_000 + 3601);
     assert!(!client.check_emergency_access(&responder, &patient));
 }
 
@@ -1039,7 +1033,7 @@ fn test_emergency_access_expires_after_one_hour() {
 fn test_emergency_access_rejected_for_non_responder() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_000);
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let contract_id = env.register(AccessControl, ());
     let client = AccessControlClient::new(&env, &contract_id);
@@ -1061,7 +1055,7 @@ fn test_emergency_access_rejected_for_non_responder() {
 fn test_emergency_access_emits_event() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_000);
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (_admin, responder, patient, client) = setup_emergency(&env);
     client.emergency_access(&responder, &patient, &make_justification(&env));
@@ -1083,10 +1077,30 @@ fn test_revoke_access_multiple_grantors_same_resource() {
     let grantor2 = Address::generate(&env);
     let grantee = Address::generate(&env);
 
-    client.register_entity(&admin, &String::from_str(&env, "Admin"));
-    client.register_entity(&grantor1, &String::from_str(&env, "Grantor1"));
-    client.register_entity(&grantor2, &String::from_str(&env, "Grantor2"));
-    client.register_entity(&grantee, &String::from_str(&env, "Grantee"));
+    client.register_entity(
+        &admin,
+        &EntityType::Hospital,
+        &String::from_str(&env, "Admin"),
+        &String::from_str(&env, "admin"),
+    );
+    client.register_entity(
+        &grantor1,
+        &EntityType::Hospital,
+        &String::from_str(&env, "Grantor1"),
+        &String::from_str(&env, "grantor"),
+    );
+    client.register_entity(
+        &grantor2,
+        &EntityType::Hospital,
+        &String::from_str(&env, "Grantor2"),
+        &String::from_str(&env, "grantor"),
+    );
+    client.register_entity(
+        &grantee,
+        &EntityType::Doctor,
+        &String::from_str(&env, "Grantee"),
+        &String::from_str(&env, "grantee"),
+    );
 
     let resource_id = String::from_str(&env, "shared-resource");
 
