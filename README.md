@@ -391,3 +391,6 @@ cargo test --test integration_tests
 
 <!-- handsoff-issue-941 -->
 - #941: [patient-registry] Test suite does not compile — 95 errors from nonce parameters added in #776
+
+<!-- handsoff-issue-970 -->
+- #970: [upgrade-governance] initialize has no authorization at all — first caller picks the signer set that controls upgrades
