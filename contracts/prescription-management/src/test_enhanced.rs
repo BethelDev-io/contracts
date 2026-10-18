@@ -1120,12 +1120,12 @@ fn test_create_template_and_issue_prescription_independently() {
     };
 
     let rx_id = client.issue_prescription(&provider, &patient, &req);
-    // Prescription IDs start at 0 (RxCounter)
-    assert_eq!(rx_id, 0);
+    // Prescription IDs start at 1 (PrescriptionCounter)
+    assert_eq!(rx_id, 1);
 
-    // Verify the prescription was stored independently
+    // Verify the prescription was stored under the namespaced key
     let stored: Prescription = env.as_contract(&contract_id, || {
-        env.storage().persistent().get(&rx_id).unwrap()
+        env.storage().persistent().get(&DataKey::Prescription(rx_id)).unwrap()
     });
     assert_eq!(stored.medication_name, String::from_str(&env, "Amoxicillin"));
     assert_eq!(stored.provider_id, provider);

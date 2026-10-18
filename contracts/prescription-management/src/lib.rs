@@ -30,6 +30,7 @@ use soroban_sdk::{
     Address, BytesN, Env, String, Symbol, Vec, contract, contractclient, contracterror,
     contractimpl, contracttype,
 };
+use ttl_config::extend_critical_ttl;
 
 // ── Allergy-management client ─────────────────────────────────────────────────
 
@@ -296,6 +297,10 @@ pub enum DataKey {
     ProviderPrescriptionLimit(Address),
     /// Per-provider sliding-window state (rate limiting).
     ProviderPrescriptionWindow(Address),
+    /// Namespaced key for an individual prescription record.
+    Prescription(u64),
+    /// Auto-incrementing counter for prescription IDs. Starts at 1.
+    PrescriptionCounter,
 }
 
 #[contracttype]
@@ -473,7 +478,11 @@ fn count_and_prune_active_prescriptions(env: &Env, patient: &Address) -> u32 {
 
     let mut still_active: Vec<u64> = Vec::new(env);
     for id in ids.iter() {
-        if let Some(prescription) = env.storage().persistent().get::<u64, Prescription>(&id) {
+        if let Some(prescription) = env
+            .storage()
+            .persistent()
+            .get::<_, Prescription>(&DataKey::Prescription(id))
+        {
             if is_prescription_active(&prescription, now) {
                 still_active.push_back(id);
             }
@@ -671,7 +680,7 @@ impl PrescriptionContract {
         let mut p: Prescription = env
             .storage()
             .persistent()
-            .get(&req.prescription_id)
+            .get(&DataKey::Prescription(req.prescription_id))
             .ok_or(Error::NotFound)?;
 
         // Validate prescription is in dispensible state
@@ -728,7 +737,8 @@ impl PrescriptionContract {
             p.status = PrescriptionStatus::PartiallyDispensed;
         }
 
-        env.storage().persistent().set(&req.prescription_id, &p);
+        env.storage().persistent().set(&DataKey::Prescription(req.prescription_id), &p);
+        extend_critical_ttl(env, &DataKey::Prescription(req.prescription_id));
 
         // Emit dispense event — quantity omitted to prevent clinical PII exposure on-chain (#227)
         env.events().publish(
@@ -749,7 +759,7 @@ impl PrescriptionContract {
         let mut p: Prescription = env
             .storage()
             .persistent()
-            .get(&req.prescription_id)
+            .get(&DataKey::Prescription(req.prescription_id))
             .ok_or(Error::NotFound)?;
 
         // Validate transfer reason
@@ -810,7 +820,8 @@ impl PrescriptionContract {
         p.current_pharmacy = Some(req.to_pharmacy.clone());
         p.status = PrescriptionStatus::Transferred;
 
-        env.storage().persistent().set(&req.prescription_id, &p);
+        env.storage().persistent().set(&DataKey::Prescription(req.prescription_id), &p);
+        extend_critical_ttl(env, &DataKey::Prescription(req.prescription_id));
 
         // Emit transfer event — transfer_reason omitted to avoid free-text PII on-chain (#227)
         env.events().publish(
@@ -831,7 +842,7 @@ impl PrescriptionContract {
         let mut p: Prescription = env
             .storage()
             .persistent()
-            .get(&prescription_id)
+            .get(&DataKey::Prescription(prescription_id))
             .ok_or(Error::NotFound)?;
 
         // Verify pharmacy is the destination
@@ -850,7 +861,8 @@ impl PrescriptionContract {
 
         // Accept transfer and activate prescription
         p.status = PrescriptionStatus::Active;
-        env.storage().persistent().set(&prescription_id, &p);
+        env.storage().persistent().set(&DataKey::Prescription(prescription_id), &p);
+        extend_critical_ttl(env, &DataKey::Prescription(prescription_id));
 
         // Emit acceptance event
         env.events().publish(
@@ -1353,7 +1365,7 @@ impl PrescriptionContract {
         let mut p: Prescription = env
             .storage()
             .persistent()
-            .get(&prescription_id)
+            .get(&DataKey::Prescription(prescription_id))
             .ok_or(Error::NotFound)?;
 
         // Validate prescription allows refills
@@ -1417,7 +1429,8 @@ impl PrescriptionContract {
             p.valid_until = new_valid_until;
         }
 
-        env.storage().persistent().set(&prescription_id, &p);
+        env.storage().persistent().set(&DataKey::Prescription(prescription_id), &p);
+        extend_critical_ttl(env, &DataKey::Prescription(prescription_id));
 
         // Emit refill event — refills_remaining omitted to avoid clinical detail on-chain (#227)
         env.events().publish(
@@ -1439,7 +1452,7 @@ impl PrescriptionContract {
         let mut p: Prescription = env
             .storage()
             .persistent()
-            .get(&prescription_id)
+            .get(&DataKey::Prescription(prescription_id))
             .ok_or(Error::NotFound)?;
 
         // Validate provider authorization
@@ -1467,7 +1480,8 @@ impl PrescriptionContract {
         }
 
         p.status = PrescriptionStatus::Cancelled;
-        env.storage().persistent().set(&prescription_id, &p);
+        env.storage().persistent().set(&DataKey::Prescription(prescription_id), &p);
+        extend_critical_ttl(env, &DataKey::Prescription(prescription_id));
 
         // Emit cancellation event — reason omitted to avoid free-text PII on-chain (#227)
         env.events().publish(
@@ -1496,7 +1510,7 @@ impl PrescriptionContract {
         let mut p: Prescription = env
             .storage()
             .persistent()
-            .get(&prescription_id)
+            .get(&DataKey::Prescription(prescription_id))
             .ok_or(Error::NotFound)?;
 
         // Validate provider authorization
@@ -1556,7 +1570,8 @@ impl PrescriptionContract {
 
         // Update prescription status to Recalled
         p.status = PrescriptionStatus::Recalled;
-        env.storage().persistent().set(&prescription_id, &p);
+        env.storage().persistent().set(&DataKey::Prescription(prescription_id), &p);
+        extend_critical_ttl(env, &DataKey::Prescription(prescription_id));
 
         // Emit recall event — clinical_justification omitted to avoid PII on-chain (#227)
         env.events().publish(
@@ -1624,6 +1639,52 @@ impl PrescriptionContract {
     pub fn get_caller_nonce(env: Env, caller: Address) -> u64 {
         let nonce_key = DataKey::CallerNonce(caller);
         env.storage().persistent().get(&nonce_key).unwrap_or(0)
+    }
+
+    /// One-off migration: re-key existing prescription records from the legacy
+    /// raw `u64` key (`0, 1, 2, …`) to the namespaced `DataKey::Prescription(id)`
+    /// key introduced by issue #956.
+    ///
+    /// Call this once after upgrading the contract WASM. Pass the first legacy
+    /// ID (inclusive) and the exclusive upper bound (the value the old `RxCounter`
+    /// held before the upgrade — i.e., the next ID that *would* have been issued).
+    ///
+    /// Safe to call multiple times: IDs that are already stored under the new
+    /// key, or that have no record under the old key, are silently skipped.
+    /// Requires admin authorization.
+    pub fn migrate_rx_keys(
+        env: Env,
+        admin: Address,
+        from_id: u64,
+        exclusive_upper: u64,
+    ) -> Result<u32, Error> {
+        admin.require_auth();
+        let configured: Option<Address> = env.storage().persistent().get(&DataKey::Admin);
+        if configured.as_ref().map_or(true, |a| *a != admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut migrated: u32 = 0;
+        let mut id = from_id;
+        while id < exclusive_upper {
+            // Skip if already under the new key
+            let new_key = DataKey::Prescription(id);
+            if !env.storage().persistent().has(&new_key) {
+                // Try to read from the legacy raw-u64 key
+                if let Some(prescription) = env
+                    .storage()
+                    .persistent()
+                    .get::<u64, Prescription>(&id)
+                {
+                    env.storage().persistent().set(&new_key, &prescription);
+                    extend_critical_ttl(&env, &new_key);
+                    migrated += 1;
+                }
+            }
+            id += 1;
+        }
+
+        Ok(migrated)
     }
 }
 
@@ -1756,20 +1817,16 @@ fn do_issue_prescription(
     }
 
     // ── Assign prescription ID and store ─────────────────────────────────────
-    let prescription_id = env
-        .storage()
-        .instance()
-        .get::<_, u64>(&DataKey::TemplateCounter) // reuse instance counter slot
-        .unwrap_or(0);
-    // Use a dedicated prescription counter separate from template counter
     let rx_id: u64 = env
         .storage()
         .instance()
-        .get::<_, u64>(&Symbol::new(env, "RxCounter"))
-        .unwrap_or(0);
+        .get::<_, u64>(&DataKey::PrescriptionCounter)
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(Error::TimestampOverflow)?;
     env.storage()
         .instance()
-        .set(&Symbol::new(env, "RxCounter"), &(rx_id + 1));
+        .set(&DataKey::PrescriptionCounter, &rx_id);
 
     let prescription = Prescription {
         provider_id: provider_id.clone(),
@@ -1792,7 +1849,8 @@ fn do_issue_prescription(
         transfer_history: Vec::new(env),
     };
 
-    env.storage().persistent().set(&rx_id, &prescription);
+    env.storage().persistent().set(&DataKey::Prescription(rx_id), &prescription);
+    extend_critical_ttl(env, &DataKey::Prescription(rx_id));
     add_patient_prescription(env, &patient_id, rx_id);
 
     env.events().publish(
