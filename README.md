@@ -391,3 +391,6 @@ cargo test --test integration_tests
 
 <!-- handsoff-issue-941 -->
 - #941: [patient-registry] Test suite does not compile — 95 errors from nonce parameters added in #776
+
+<!-- handsoff-issue-967 -->
+- #967: [upgrade-governance] Governance can only upgrade itself — none of the 40+ healthcare contracts expose an upgrade entry point
