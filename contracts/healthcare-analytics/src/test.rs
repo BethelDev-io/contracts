@@ -877,7 +877,7 @@ fn test_cpu_quota_accumulates_across_jobs() {
         &DegradationPolicy::Fail,
     ).unwrap().unwrap().job_id;
     client.execute_next_report(&admin).unwrap();
-    client.complete_report(&job1, &400, &50, &50);
+    client.complete_report(&admin, &job1, &400, &50);
 
     // Second job: another 400 CPU — still below threshold (total 800, not > 800)
     let job2 = client.try_request_report(
@@ -889,7 +889,7 @@ fn test_cpu_quota_accumulates_across_jobs() {
         &DegradationPolicy::Fail,
     ).unwrap().unwrap().job_id;
     client.execute_next_report(&admin).unwrap();
-    client.complete_report(&job2, &400, &50, &50);
+    client.complete_report(&admin, &job2, &400, &50);
 
     // Now TotalCpuUsed = 800; 800*100/1000 = 80, which is NOT > 80, so one more is still ok.
     // Push it over: complete a tiny job that adds 1 more CPU unit.
@@ -902,7 +902,7 @@ fn test_cpu_quota_accumulates_across_jobs() {
         &DegradationPolicy::Fail,
     ).unwrap().unwrap().job_id;
     client.execute_next_report(&admin).unwrap();
-    client.complete_report(&job3, &1, &1, &50);
+    client.complete_report(&admin, &job3, &1, &1);
 
     // TotalCpuUsed = 801; 801*100/1000 = 80 (integer), still not > 80.
     // Add one more to make it 901 total.
@@ -914,8 +914,8 @@ fn test_cpu_quota_accumulates_across_jobs() {
         &1,
         &DegradationPolicy::Fail,
     ).unwrap().unwrap().job_id;
-    client.execute_next_report(&admin);
-    client.complete_report(&job4, &100, &1, &50);
+    client.execute_next_report(&admin).unwrap();
+    client.complete_report(&admin, &job4, &100, &1, &50);
 
     // TotalCpuUsed = 901; 901*100/1000 = 90 > 80 → throttled
     let result = client.try_request_report(

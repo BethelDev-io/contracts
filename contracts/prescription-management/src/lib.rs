@@ -46,11 +46,14 @@ pub struct AllergyInteraction {
 
 #[contractclient(name = "AllergyManagementClient")]
 pub trait AllergyManagementInterface {
+    /// Matches `allergy-management`'s real interface: the caller must pass its
+    /// own address as `requester` and authorize as that address (#952).
     fn check_drug_allergy_interaction(
         env: Env,
         patient_id: Address,
+        requester: Address,
         drug_name: String,
-    ) -> Vec<AllergyInteraction>;
+    ) -> Result<Vec<AllergyInteraction>, soroban_sdk::Error>;
 }
 
 // ── Provider-registry client ──────────────────────────────────────────────────
@@ -268,10 +271,9 @@ pub enum Error {
     /// Provider has exceeded their per-window prescription issuance limit
     RateLimitExceeded = 30,
     StaleNonce = 31,
-    /// The provider-registry has not been configured yet, so provider
-    /// authorization cannot be verified. Returned instead of silently
-    /// skipping the check (fail-closed).
-    NotInitialized = 32,
+    /// The allergy-management cross-contract check could not be completed;
+    /// the prescription is refused rather than issued unchecked (#952)
+    AllergyCheckUnavailable = 32,
 }
 
 #[contracttype]
@@ -830,20 +832,21 @@ impl PrescriptionContract {
     ) -> Result<u64, Error> {
         provider.require_auth();
 
-        require_registered_provider(&env, &provider)?;
+        // #953: a template must not persist an allergy bypass — it would silently
+        // wave through every future issue without any per-issue admin approval.
+        if template.bypass_allergy_check {
+            return Err(Error::AllergyBypassRequiresAdmin);
+        }
 
-        // Controlled-substance templates are validated exactly like directly
-        // issued prescriptions, so a template cannot be used to sidestep
-        // schedule/DEA/refill rules at issuance time.
-        if template.is_controlled {
-            validate_controlled_substance(
-                &env,
-                &provider,
-                template.schedule,
-                template.refills_allowed,
-                template.days_supply,
-                &template.dea_number,
-            )?;
+        if let Some(registry_addr) = env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::ProviderRegistry)
+        {
+            let client = ProviderRegistryClient::new(&env, &registry_addr);
+            if !client.is_provider(&provider) {
+                return Err(Error::ProviderNotRegistered);
+            }
         }
 
         let template_id = env
@@ -866,9 +869,10 @@ impl PrescriptionContract {
             schedule: template.schedule,
             substitution_allowed: template.substitution_allowed,
             pharmacy_id: template.pharmacy_id,
-            bypass_allergy_check: template.bypass_allergy_check,
+            // #953: never persist a bypass on a template.
+            bypass_allergy_check: false,
             dea_number: template.dea_number,
-            bypass_reason_hash: template.bypass_reason_hash,
+            bypass_reason_hash: None,
         };
 
         env.storage()
@@ -916,9 +920,11 @@ impl PrescriptionContract {
             valid_until,
             substitution_allowed: template.substitution_allowed,
             pharmacy_id: template.pharmacy_id,
-            bypass_allergy_check: template.bypass_allergy_check,
+            // #953: a stored template can never carry an allergy bypass; each
+            // issue must request admin approval explicitly.
+            bypass_allergy_check: false,
             dea_number: template.dea_number,
-            bypass_reason_hash: template.bypass_reason_hash,
+            bypass_reason_hash: None,
         };
 
         do_issue_prescription(&env, provider, patient, req)
@@ -1927,11 +1933,24 @@ fn do_issue_prescription(
     patient_id: Address,
     req: IssueRequest,
 ) -> Result<u64, Error> {
-    // ── #481: bypass_allergy_check requires a non-empty reason hash ───────────
+    // ── #481/#953: bypass_allergy_check requires a non-zero reason hash and a
+    // second admin authorization ─────────────────────────────────────────────
     if req.bypass_allergy_check {
-        if req.bypass_reason_hash.is_none() {
+        let reason_hash = match req.bypass_reason_hash.clone() {
+            Some(hash) => hash,
+            None => return Err(Error::MissingOverrideReason),
+        };
+        if reason_hash == BytesN::from_array(env, &[0u8; 32]) {
             return Err(Error::MissingOverrideReason);
         }
+        // The prescriber cannot unilaterally waive a documented allergy: the
+        // configured admin must co-sign the transaction (#953).
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(Error::AllergyBypassRequiresAdmin)?;
+        admin.require_auth();
     }
 
     // ── Provider registration check (fail-closed) ─────────────────────────────
@@ -2003,8 +2022,20 @@ fn do_issue_prescription(
             .unwrap_or(false);
 
         let allergy_client = AllergyManagementClient::new(env, &allergy_addr);
-        let interactions = allergy_client
-            .check_drug_allergy_interaction(&patient_id, &req.medication_name);
+        // The prescription contract authorizes as itself: `allergy-management`
+        // requires `requester.require_auth()` and the address must hold a read
+        // grant for the patient (#952).
+        let requester = env.current_contract_address();
+        let interactions = match allergy_client.try_check_drug_allergy_interaction(
+            &patient_id,
+            &requester,
+            &req.medication_name,
+        ) {
+            Ok(Ok(interactions)) => interactions,
+            // Fail closed: a missing, archived or incompatible allergy registry
+            // must never let an unchecked prescription through (#952).
+            _ => return Err(Error::AllergyCheckUnavailable),
+        };
 
         if !interactions.is_empty() {
             if req.bypass_allergy_check {
