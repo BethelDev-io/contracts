@@ -6,6 +6,8 @@ edition = "2024"
 
 [dependencies]
 soroban-sdk = { workspace = true }
+shared = { workspace = true }
 
 [dev-dependencies]
+provider-registry = { path = "../provider-registry" }
 soroban-sdk = { workspace = true, features = ["testutils"] }
