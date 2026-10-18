@@ -1276,7 +1276,7 @@ fn test_mark_goal_achieved_and_resolve_barrier_allowed_on_closed_plan() {
 
 #[test]
 fn test_add_care_goal_rejects_unbound_caller() {
-    let (env, provider, patient) = setup();
+    let (env, _, _) = setup();
     let (_, client, plan_id) = register_and_create_plan(&env);
     let unbound_address = Address::generate(&env);
 
@@ -1293,7 +1293,7 @@ fn test_add_care_goal_rejects_unbound_caller() {
 
 #[test]
 fn test_add_intervention_rejects_unbound_caller() {
-    let (env, provider, patient) = setup();
+    let (env, _, _) = setup();
     let (_, client, plan_id) = register_and_create_plan(&env);
     let unbound_address = Address::generate(&env);
 
@@ -1310,7 +1310,7 @@ fn test_add_intervention_rejects_unbound_caller() {
 
 #[test]
 fn test_add_barrier_rejects_unbound_caller() {
-    let (env, provider, patient) = setup();
+    let (env, _, _) = setup();
     let (_, client, plan_id) = register_and_create_plan(&env);
     let unbound_address = Address::generate(&env);
 
@@ -1326,7 +1326,7 @@ fn test_add_barrier_rejects_unbound_caller() {
 
 #[test]
 fn test_schedule_care_plan_review_rejects_unbound_caller() {
-    let (env, provider, patient) = setup();
+    let (env, _, _) = setup();
     let (_, client, plan_id) = register_and_create_plan(&env);
     let unbound_address = Address::generate(&env);
 
@@ -1341,8 +1341,8 @@ fn test_schedule_care_plan_review_rejects_unbound_caller() {
 
 #[test]
 fn test_mark_goal_achieved_rejects_unbound_caller() {
-    let (env, provider, patient) = setup();
-    let (_, client, plan_id) = register_and_create_plan(&env);
+    let (env, _, _) = setup();
+    let (provider, client, plan_id) = register_and_create_plan(&env);
     let unbound_address = Address::generate(&env);
 
     let goal_id = client.add_care_goal(
@@ -1365,8 +1365,8 @@ fn test_mark_goal_achieved_rejects_unbound_caller() {
 
 #[test]
 fn test_resolve_barrier_rejects_unbound_caller() {
-    let (env, provider, patient) = setup();
-    let (_, client, plan_id) = register_and_create_plan(&env);
+    let (env, _, _) = setup();
+    let (provider, client, plan_id) = register_and_create_plan(&env);
     let unbound_address = Address::generate(&env);
 
     let barrier_id = client.add_barrier(
@@ -1384,4 +1384,53 @@ fn test_resolve_barrier_rejects_unbound_caller() {
         &1_100_000u64,
     );
     assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+// -----------------------------------------------------------------------
+// #845 / #933: get_care_plan_summary access control
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_get_care_plan_summary_rejects_unbound_caller() {
+    let (env, _, _) = setup();
+    let (_, client, plan_id) = register_and_create_plan(&env);
+    let unbound_address = Address::generate(&env);
+
+    let result = client.try_get_care_plan_summary(&plan_id, &unbound_address);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn test_get_care_plan_summary_allows_patient_and_care_team_member() {
+    let (env, provider, patient) = setup();
+    let contract_id = env.register(CarePlanContract, ());
+    let client = CarePlanContractClient::new(&env, &contract_id);
+    let mut conditions = Vec::new(&env);
+    conditions.push_back(String::from_str(&env, "Hypertension"));
+    let mut goals = Vec::new(&env);
+    goals.push_back(String::from_str(&env, "Lower BP to <130/80"));
+    let plan_id = client.create_care_plan(
+        &patient,
+        &provider,
+        &Symbol::new(&env, "chronic_disease"),
+        &conditions,
+        &goals,
+        &1_000_000u64,
+        &30u32,
+    );
+
+    let specialist = Address::generate(&env);
+    client.assign_care_team_member(
+        &plan_id,
+        &provider,
+        &specialist,
+        &Symbol::new(&env, "specialist"),
+        &Vec::new(&env),
+    );
+
+    let by_patient = client.get_care_plan_summary(&plan_id, &patient);
+    assert_eq!(by_patient.patient_id, patient);
+
+    let by_member = client.get_care_plan_summary(&plan_id, &specialist);
+    assert_eq!(by_member.care_team.len(), 1);
 }

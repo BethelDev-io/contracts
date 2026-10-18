@@ -297,7 +297,8 @@ jobs:
     steps:
       - name: Check all jobs
         run: |
-          if [[ "${{ needs.format.result }}" != "success" ]] || \
+          if [[ "${{ needs.truncation-markers.result }}" != "success" ]] || \
+             [[ "${{ needs.format.result }}" != "success" ]] || \
              [[ "${{ needs.check.result }}" != "success" ]] || \
              [[ "${{ needs.check-lab-management.result }}" != "success" ]] || \
              [[ "${{ needs.check-medical-device-tracking.result }}" != "success" ]] || \

@@ -211,26 +211,3 @@ pub fn save_care_team(env: &Env, care_plan_id: u64, team: &Vec<CareTeamMember>) 
         .persistent()
         .set(&DataKey::PlanCareTeam(care_plan_id), team);
 }
-
-// -----------------------------------------------------------------------
-// Access control
-// -----------------------------------------------------------------------
-
-/// Returns true when `requester` is the patient of `plan` or is bound to the
-/// plan as its provider or a care-team member. Mirrors the authorization
-/// pattern used by the contract's mutating entry points.
-pub fn is_bound_to_plan(env: &Env, plan: &CarePlan, requester: &Address) -> bool {
-    if requester == &plan.patient_id {
-        return true;
-    }
-    if requester == &plan.provider_id {
-        return true;
-    }
-    let team = load_care_team(env, plan.care_plan_id);
-    for member in team.iter() {
-        if &member.member_id == requester {
-            return true;
-        }
-    }
-    false
-}

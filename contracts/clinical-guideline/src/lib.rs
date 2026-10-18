@@ -260,6 +260,187 @@ impl ClinicalGuidelineContract {
         if !Self::is_provider_registered(&env, &provider_id) {
             return Err(Error::NotAuthorized);
         }
-        let gfr = renal_function
+        let gfr = renal_function.unwrap_or(100);
+        let is_renal_impaired = gfr < 60;
 
-/* … truncated 72 chars — edit only what you need near the top … */
+        // Example: 5mg per kg (1000g = 10000dg)
+        // dosage = (weight_dg / 10000) * 5
+        let mut dose_mg = (weight_dg as u64 * 5) / 10000;
+
+        // Reduce dose by 25% for renal impairment (GFR < 60)
+        if is_renal_impaired {
+            dose_mg = (dose_mg * 75) / 100;
+        }
+
+        // Build dose string: "XXmg" (simple numeric representation)
+        let dose_str = match dose_mg {
+            0 => String::from_str(&env, "0mg"),
+            1..=9 => {
+                let s = match dose_mg {
+                    1 => "1mg",
+                    2 => "2mg",
+                    3 => "3mg",
+                    4 => "4mg",
+                    5 => "5mg",
+                    6 => "6mg",
+                    7 => "7mg",
+                    8 => "8mg",
+                    9 => "9mg",
+                    _ => "0mg",
+                };
+                String::from_str(&env, s)
+            }
+            _ => String::from_str(&env, "10+mg"),
+        };
+
+        Ok(DosageRecommendation {
+            medication,
+            recommended_dose: dose_str,
+            frequency: String::from_str(&env, "TID"),
+            route: Symbol::new(&env, "Oral"),
+            duration: Some(604800), // 7 days in seconds
+            renal_adjustment: is_renal_impaired,
+            monitoring_required: Vec::new(&env),
+        })
+    }
+
+    pub fn assess_risk_score(
+        env: Env,
+        _patient_id: Address,
+        provider_id: Address,
+        risk_calculator: Symbol,
+        input_parameters: Vec<i32>,
+    ) -> Result<RiskScore, Error> {
+        provider_id.require_auth();
+        if !Self::is_provider_registered(&env, &provider_id) {
+            return Err(Error::NotAuthorized);
+        }
+        let mut total_score: i32 = 0;
+        for val in input_parameters.iter() {
+            total_score += val;
+        }
+        Ok(RiskScore {
+            calculator: risk_calculator,
+            score: total_score,
+            interpretation: String::from_str(&env, "Risk assessment complete"),
+        })
+    }
+
+    pub fn suggest_care_pathway(
+        env: Env,
+        _patient_id: Address,
+        provider_id: Address,
+        condition: String,
+        _current_treatment: Vec<String>,
+    ) -> Result<CarePathway, Error> {
+        provider_id.require_auth();
+        if !Self::is_provider_registered(&env, &provider_id) {
+            return Err(Error::NotAuthorized);
+        }
+        let mut steps = Vec::new(&env);
+        steps.push_back(String::from_str(&env, "Initial Diagnosis"));
+        steps.push_back(String::from_str(&env, "Standard Treatment"));
+        steps.push_back(String::from_str(&env, "Follow-up"));
+
+        Ok(CarePathway { condition, steps })
+    }
+
+    pub fn create_reminder(
+        env: Env,
+        patient_id: Address,
+        provider_id: Address,
+        _reminder_type: Symbol,
+        due_date: u64,
+        _priority: Symbol,
+    ) -> Result<u64, Error> {
+        provider_id.require_auth();
+        if !Self::is_provider_registered(&env, &provider_id) {
+            return Err(Error::NotAuthorized);
+        }
+
+        let counter_key = DataKey::ReminderCounter(patient_id.clone());
+        let reminder_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&counter_key)
+            .unwrap_or(1);
+
+        let reminder = Reminder {
+            reminder_id,
+            patient_id: patient_id.clone(),
+            due_date,
+            created_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Reminder(patient_id.clone(), reminder_id), &reminder);
+        env.storage()
+            .persistent()
+            .set(&counter_key, &(reminder_id + 1));
+
+        env.events().publish(
+            (symbol_short!("create_rem"), reminder_id),
+            (patient_id, provider_id),
+        );
+
+        Ok(reminder_id)
+    }
+
+    /// Read a reminder. The caller must authorize and be either the patient
+    /// the reminder belongs to or a provider registered in the provider
+    /// registry.
+    pub fn get_reminder(
+        env: Env,
+        caller: Address,
+        patient_id: Address,
+        reminder_id: u64,
+    ) -> Result<Reminder, Error> {
+        caller.require_auth();
+        if caller != patient_id && !Self::is_provider_registered(&env, &caller) {
+            return Err(Error::NotAuthorized);
+        }
+        env.storage()
+            .persistent()
+            .get(&DataKey::Reminder(patient_id, reminder_id))
+            .ok_or(Error::GuidelineNotFound)
+    }
+
+    pub fn check_preventive_care(
+        env: Env,
+        _patient_id: Address,
+        provider_id: Address,
+        age: u32,
+        _gender: Symbol,
+        _risk_factors: Vec<Symbol>,
+    ) -> Result<Vec<Symbol>, Error> {
+        provider_id.require_auth();
+        if !Self::is_provider_registered(&env, &provider_id) {
+            return Err(Error::NotAuthorized);
+        }
+        let mut alerts = Vec::new(&env);
+
+        if age > 50 {
+            alerts.push_back(Symbol::new(&env, "Screening_A"));
+        }
+        if age > 20 {
+            alerts.push_back(Symbol::new(&env, "Regular_Checkup"));
+        }
+
+        Ok(alerts)
+    }
+
+    fn is_provider_registered(env: &Env, provider: &Address) -> bool {
+        if let Some(registry) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::ProviderRegistry)
+        {
+            shared::actor_verification::is_provider_registered(env, &registry, provider)
+        } else {
+            false
+        }
+    }
+}
+
+mod test;
