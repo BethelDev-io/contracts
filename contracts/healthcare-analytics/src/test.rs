@@ -1,7 +1,9 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{symbol_short, testutils::Address as _, Address, BytesN, Env, String};
+use soroban_sdk::{
+    symbol_short, testutils::Address as _, testutils::Ledger, Address, BytesN, Env, String,
+};
 
 fn setup() -> (Env, HealthcareAnalyticsClient<'static>, Address) {
     let env = Env::default();
@@ -873,7 +875,7 @@ fn test_cpu_quota_accumulates_across_jobs() {
         &DegradationPolicy::Fail,
     ).unwrap().unwrap().job_id;
     client.execute_next_report(&admin).unwrap();
-    client.complete_report(&job1, &400, &50);
+    client.complete_report(&admin, &job1, &400, &50);
 
     // Second job: another 400 CPU — still below threshold (total 800, not > 800)
     let job2 = client.try_request_report(
@@ -885,7 +887,7 @@ fn test_cpu_quota_accumulates_across_jobs() {
         &DegradationPolicy::Fail,
     ).unwrap().unwrap().job_id;
     client.execute_next_report(&admin).unwrap();
-    client.complete_report(&job2, &400, &50);
+    client.complete_report(&admin, &job2, &400, &50);
 
     // Now TotalCpuUsed = 800; 800*100/1000 = 80, which is NOT > 80, so one more is still ok.
     // Push it over: complete a tiny job that adds 1 more CPU unit.
@@ -898,7 +900,7 @@ fn test_cpu_quota_accumulates_across_jobs() {
         &DegradationPolicy::Fail,
     ).unwrap().unwrap().job_id;
     client.execute_next_report(&admin).unwrap();
-    client.complete_report(&job3, &1, &1);
+    client.complete_report(&admin, &job3, &1, &1);
 
     // TotalCpuUsed = 801; 801*100/1000 = 80 (integer), still not > 80.
     // Add one more to make it 901 total.
@@ -910,8 +912,8 @@ fn test_cpu_quota_accumulates_across_jobs() {
         &1,
         &DegradationPolicy::Fail,
     ).unwrap().unwrap().job_id;
-    client.execute_next_report();
-    client.complete_report(&job4, &100, &1, &50);
+    client.execute_next_report(&admin).unwrap();
+    client.complete_report(&admin, &job4, &100, &1, &50);
 
     // TotalCpuUsed = 901; 901*100/1000 = 90 > 80 → throttled
     let result = client.try_request_report(
@@ -956,7 +958,7 @@ fn test_cancel_report_queued() {
 
     // Cancelled job ID cannot be re-executed
     let next_job = client.execute_next_report(&admin);
-    assert_eq!(next_job, Ok(None));
+    assert_eq!(next_job, None);
 }
 
 #[test]
@@ -977,7 +979,7 @@ fn test_cancel_report_executing() {
     let job_id = accepted.job_id;
 
     // Start executing the job
-    let executed_id = client.execute_next_report(&admin).unwrap().unwrap();
+    let executed_id = client.execute_next_report(&admin).unwrap();
     assert_eq!(executed_id, job_id);
 
     // Executing job cancellation returns Error::JobAlreadyExecuting
@@ -1027,7 +1029,7 @@ fn test_execute_next_report_admin_succeeds() {
 
     // Admin call should succeed and return the job_id
     let result = client.execute_next_report(&admin);
-    assert_eq!(result, Ok(Some(accepted.job_id)));
+    assert_eq!(result, Some(accepted.job_id));
 }
 
 // ========================
@@ -1134,7 +1136,8 @@ fn test_expired_rotation_can_be_replaced_without_accept_attempt() {
     let replacement = Address::generate(&env);
 
     client.propose_admin_rotation(&admin, &typo);
-    env.ledger().set_timestamp(env.ledger().timestamp() + ADMIN_ROTATION_WINDOW + 1);
+    let now = env.ledger().timestamp();
+    env.ledger().with_mut(|l| l.timestamp = now + ADMIN_ROTATION_WINDOW + 1);
 
     client.propose_admin_rotation(&admin, &replacement);
     client.accept_admin_rotation(&replacement);

@@ -4101,6 +4101,50 @@ fn test_batch_register_patients_over_limit_fails() {
     assert!(result.is_err());
 }
 
+// ── #957: batch registration must be authorized ──────────────────────────────
+
+/// Without any authorization the batch path must be rejected. Previously
+/// `batch_register_patients` performed no auth checks at all, so any account
+/// could register arbitrary wallets as patients — and because registration is
+/// insert-only, a squatted wallet could never register itself afterwards.
+#[test]
+fn test_batch_register_patients_requires_authorization() {
+    let env = Env::default();
+    let contract_id = env.register(MedicalRegistry, ());
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    // `initialize` itself requires no authorization.
+    client.initialize(&admin, &treasury, &fee_token);
+
+    let victim = Address::generate(&env);
+    let mut entries = Vec::new(&env);
+    entries.push_back(BatchPatientEntry {
+        wallet: victim.clone(),
+        name: String::from_str(&env, "Squatter"),
+        dob: 0u64,
+        encrypted_metadata_ref: encrypted_ref(&env, 1),
+        policy: policy(&env),
+    });
+
+    let result = client.try_batch_register_patients(&entries);
+    assert!(result.is_err());
+
+    // Nothing was written: the victim can still register themselves.
+    assert_eq!(client.get_total_patients(), 0);
+    env.mock_all_auths();
+    client.register_patient(
+        &victim,
+        &String::from_str(&env, "Victim"),
+        &631152000u64,
+        &encrypted_ref(&env, 2),
+        &policy(&env),
+    );
+    assert_eq!(client.get_total_patients(), 1);
+}
+
 // -------------------------------------------------------
 // #467 — PatientStatusChanged events
 // -------------------------------------------------------

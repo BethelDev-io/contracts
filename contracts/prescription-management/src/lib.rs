@@ -30,6 +30,7 @@ use soroban_sdk::{
     Address, BytesN, Env, String, Symbol, Vec, contract, contractclient, contracterror,
     contractimpl, contracttype,
 };
+use ttl_config::extend_critical_ttl;
 
 // ── Allergy-management client ─────────────────────────────────────────────────
 
@@ -45,11 +46,14 @@ pub struct AllergyInteraction {
 
 #[contractclient(name = "AllergyManagementClient")]
 pub trait AllergyManagementInterface {
+    /// Matches `allergy-management`'s real interface: the caller must pass its
+    /// own address as `requester` and authorize as that address (#952).
     fn check_drug_allergy_interaction(
         env: Env,
         patient_id: Address,
+        requester: Address,
         drug_name: String,
-    ) -> Vec<AllergyInteraction>;
+    ) -> Result<Vec<AllergyInteraction>, soroban_sdk::Error>;
 }
 
 // ── Provider-registry client ──────────────────────────────────────────────────
@@ -78,6 +82,18 @@ pub const MIN_REFILL_QUANTITY_DIVISOR: u32 = 2;
 pub const DEFAULT_PRESCRIPTION_LIMIT: u32 = 100;
 /// Duration of the per-provider rate-limit window.
 pub const RATE_LIMIT_WINDOW_SECS: u64 = 24 * SECONDS_PER_HOUR;
+
+/// Persistent-entry TTL management for prescription records, expressed in
+/// ledgers (~5s per ledger) and matching the repo's `critical` retention class.
+/// Entries are bumped when fewer than `PRESCRIPTION_TTL_THRESHOLD` ledgers
+/// remain, extending them by `PRESCRIPTION_TTL_EXTEND`.
+pub const PRESCRIPTION_TTL_THRESHOLD: u32 = 518_400;
+pub const PRESCRIPTION_TTL_EXTEND: u32 = 535_680;
+
+/// Maximum refills allowed for schedules III–V.
+pub const MAX_SCHEDULE_REFILLS: u32 = 5;
+/// Maximum days supply for schedules III–IV (statutory 6-month cap).
+pub const MAX_SCHEDULE_DAYS_SUPPLY: u32 = 180;
 
 // ── DEA number validation ─────────────────────────────────────────────────────
 
@@ -132,6 +148,84 @@ fn validate_dea_number(dea: &[u8]) -> bool {
     check == digits[6]
 }
 
+/// Validate the controlled-substance fields of an issuance request.
+///
+/// Enforced rules:
+/// 1. `schedule` must be present and within `1..=5`.
+/// 2. `dea_number` must be a checksum-valid DEA number **and** must match the
+///    DEA number recorded for `provider` via `set_provider_dea`. A provider
+///    with no recorded DEA number returns `ProviderNotRegistered`; a
+///    mismatch (or a missing/malformed number) returns
+///    `ControlledSubstanceViolation`. This binds the DEA number to the
+///    prescriber instead of accepting any checksum-valid string.
+/// 3. Refill / days-supply caps: Schedule II may not carry refills;
+///    schedules III–V are capped at `MAX_SCHEDULE_REFILLS` refills; schedules
+///    III–IV are capped at `MAX_SCHEDULE_DAYS_SUPPLY` days supply.
+fn validate_controlled_substance(
+    env: &Env,
+    provider: &Address,
+    schedule: Option<u32>,
+    refills_allowed: u32,
+    days_supply: u32,
+    dea_number: &Option<String>,
+) -> Result<(), Error> {
+    // (1) The schedule must be an actual DEA schedule — `Some(0)`, `Some(6)`
+    // and `Some(255)` are all invalid and must not be stored.
+    let schedule = schedule.ok_or(Error::ControlledSubstanceViolation)?;
+    if !(1..=5).contains(&schedule) {
+        return Err(Error::ControlledSubstanceViolation);
+    }
+
+    // (2) The DEA number must be well-formed and belong to the prescriber.
+    let dea = dea_number
+        .clone()
+        .ok_or(Error::ControlledSubstanceViolation)?;
+    if dea.len() != 9u32 {
+        return Err(Error::ControlledSubstanceViolation);
+    }
+    let mut buf = [0u8; 9];
+    dea.copy_into_slice(&mut buf);
+    if !validate_dea_number(&buf) {
+        return Err(Error::ControlledSubstanceViolation);
+    }
+
+    let registered: String = env
+        .storage()
+        .persistent()
+        .get(&DataKey::ProviderDea(provider.clone()))
+        .ok_or(Error::ProviderNotRegistered)?;
+    if registered != dea {
+        return Err(Error::ControlledSubstanceViolation);
+    }
+
+    // (3) Schedule-specific refill and days-supply caps.
+    match schedule {
+        // Schedule I (research only) has no additional request-level caps here.
+        1 => {}
+        // Schedule II prescriptions may not be refilled.
+        2 => {
+            if refills_allowed != 0 {
+                return Err(Error::ControlledSubstanceViolation);
+            }
+        }
+        // Schedules III–IV: max 5 refills and a 6-month (180 day) supply cap.
+        3 | 4 => {
+            if refills_allowed > MAX_SCHEDULE_REFILLS || days_supply > MAX_SCHEDULE_DAYS_SUPPLY {
+                return Err(Error::ControlledSubstanceViolation);
+            }
+        }
+        // Schedule V: max 5 refills.
+        5 => {
+            if refills_allowed > MAX_SCHEDULE_REFILLS {
+                return Err(Error::ControlledSubstanceViolation);
+            }
+        }
+        _ => return Err(Error::ControlledSubstanceViolation),
+    }
+
+    Ok(())
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -177,6 +271,9 @@ pub enum Error {
     /// Provider has exceeded their per-window prescription issuance limit
     RateLimitExceeded = 30,
     StaleNonce = 31,
+    /// The allergy-management cross-contract check could not be completed;
+    /// the prescription is refused rather than issued unchecked (#952)
+    AllergyCheckUnavailable = 32,
 }
 
 #[contracttype]
@@ -296,6 +393,12 @@ pub enum DataKey {
     ProviderPrescriptionLimit(Address),
     /// Per-provider sliding-window state (rate limiting).
     ProviderPrescriptionWindow(Address),
+    /// Prescription record keyed by its namespaced prescription id.
+    Prescription(u64),
+    /// Auto-incrementing counter holding the last assigned prescription id.
+    PrescriptionCounter,
+    /// Verified DEA registration number for a provider (set by the admin).
+    ProviderDea(Address),
 }
 
 #[contracttype]
@@ -473,7 +576,7 @@ fn count_and_prune_active_prescriptions(env: &Env, patient: &Address) -> u32 {
 
     let mut still_active: Vec<u64> = Vec::new(env);
     for id in ids.iter() {
-        if let Some(prescription) = env.storage().persistent().get::<u64, Prescription>(&id) {
+        if let Some(prescription) = get_prescription(env, id) {
             if is_prescription_active(&prescription, now) {
                 still_active.push_back(id);
             }
@@ -482,7 +585,30 @@ fn count_and_prune_active_prescriptions(env: &Env, patient: &Address) -> u32 {
 
     let count = still_active.len();
     env.storage().persistent().set(&key, &still_active);
+    extend_persistent_ttl(env, &key);
     count
+}
+
+/// Read a prescription record by its namespaced id.
+fn get_prescription(env: &Env, prescription_id: u64) -> Option<Prescription> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Prescription(prescription_id))
+}
+
+/// Persist a prescription record under `DataKey::Prescription(id)` and bump its
+/// persistent TTL so long-lived records do not silently expire.
+fn put_prescription(env: &Env, prescription_id: u64, prescription: &Prescription) {
+    let key = DataKey::Prescription(prescription_id);
+    env.storage().persistent().set(&key, prescription);
+    extend_persistent_ttl(env, &key);
+}
+
+/// Bump the TTL of a persistent entry when it drops below the standard threshold.
+fn extend_persistent_ttl(env: &Env, key: &DataKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, PRESCRIPTION_TTL_THRESHOLD, PRESCRIPTION_TTL_EXTEND);
 }
 
 /// Records `prescription_id` as belonging to `patient` in the
@@ -492,6 +618,7 @@ fn add_patient_prescription(env: &Env, patient: &Address, prescription_id: u64) 
     let mut ids: Vec<u64> = env.storage().persistent().get(&key).unwrap_or(Vec::new(env));
     ids.push_back(prescription_id);
     env.storage().persistent().set(&key, &ids);
+    extend_persistent_ttl(env, &key);
 }
 
 #[contract]
@@ -499,12 +626,35 @@ pub struct PrescriptionContract;
 
 #[contractimpl]
 impl PrescriptionContract {
-    /// Store the provider-registry contract address for cross-contract verification.
-    /// Must be called once before issue_prescription is used.
-    pub fn initialize(env: Env, provider_registry: Address) -> Result<(), Error> {
+    /// Initialize the contract with the admin, and the provider-registry
+    /// contract address used for cross-contract provider verification.
+    ///
+    /// `admin` must authorize this call, so an attacker cannot front-run
+    /// deployment and point `provider_registry` at a malicious contract whose
+    /// `is_provider` always returns `true`. Fails with `AlreadyExists` if
+    /// called more than once.
+    pub fn initialize(env: Env, admin: Address, provider_registry: Address) -> Result<(), Error> {
         if env.storage().persistent().has(&DataKey::ProviderRegistry) {
             return Err(Error::AlreadyExists);
         }
+        admin.require_auth();
+        env.storage().persistent().set(&DataKey::Admin, &admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ProviderRegistry, &provider_registry);
+        Ok(())
+    }
+
+    /// Replace the configured provider-registry contract (admin only).
+    ///
+    /// This is the corrective path for a registry that was configured
+    /// incorrectly, without requiring a contract upgrade.
+    pub fn set_provider_registry(
+        env: Env,
+        admin: Address,
+        provider_registry: Address,
+    ) -> Result<(), Error> {
+        require_admin(&env, &admin)?;
         env.storage()
             .persistent()
             .set(&DataKey::ProviderRegistry, &provider_registry);
@@ -563,14 +713,130 @@ impl PrescriptionContract {
         Ok(())
     }
 
+    /// Register the verified DEA number for `provider` (admin only).
+    ///
+    /// The recorded number is the one `issue_prescription` requires for
+    /// controlled substances, binding the DEA registration to the prescriber
+    /// instead of accepting any checksum-valid string (#955).
+    pub fn set_provider_dea(
+        env: Env,
+        admin: Address,
+        provider: Address,
+        dea_number: String,
+    ) -> Result<(), Error> {
+        require_admin(&env, &admin)?;
+
+        if dea_number.len() != 9u32 {
+            return Err(Error::ControlledSubstanceViolation);
+        }
+        let mut buf = [0u8; 9];
+        dea_number.copy_into_slice(&mut buf);
+        if !validate_dea_number(&buf) {
+            return Err(Error::ControlledSubstanceViolation);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::ProviderDea(provider), &dea_number);
+        Ok(())
+    }
+
+    /// Remove the DEA number recorded for `provider` (admin only), e.g. after
+    /// the registration lapses. Controlled-substance issuance for that provider
+    /// then fails with `ProviderNotRegistered`.
+    pub fn clear_provider_dea(
+        env: Env,
+        admin: Address,
+        provider: Address,
+    ) -> Result<(), Error> {
+        require_admin(&env, &admin)?;
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ProviderDea(provider));
+        Ok(())
+    }
+
+    /// Return the verified DEA number recorded for `provider`, if any.
+    pub fn get_provider_dea(env: Env, provider: Address) -> Option<String> {
+        env.storage().persistent().get(&DataKey::ProviderDea(provider))
+    }
+
+    /// One-off migration for prescriptions stored under the legacy, unnamespaced
+    /// `u64` keyspace.
+    ///
+    /// Records written before `DataKey::Prescription(id)` was introduced live
+    /// under raw `u64` keys `0..legacy_counter`, with the counter itself under
+    /// the raw `"RxCounter"` symbol. This rewrites every such record to
+    /// `DataKey::Prescription(id + 1)` (ids start at 1), rebuilds the
+    /// per-patient index from each migrated record, stores the new
+    /// `PrescriptionCounter`, removes the legacy keys, and returns the number of
+    /// records migrated.
+    ///
+    /// Admin only. A no-op returning `0` once the namespaced counter exists.
+    pub fn migrate_prescription_keys(env: Env, admin: Address) -> Result<u32, Error> {
+        require_admin(&env, &admin)?;
+
+        if env.storage().instance().has(&DataKey::PrescriptionCounter) {
+            return Ok(0);
+        }
+
+        let legacy_symbol = Symbol::new(&env, "RxCounter");
+        let legacy_count: u64 = env
+            .storage()
+            .instance()
+            .get(&legacy_symbol)
+            .unwrap_or(0);
+
+        let mut migrated: u32 = 0;
+        let mut id: u64 = 0;
+        while id < legacy_count {
+            if let Some(record) = env.storage().persistent().get::<u64, Prescription>(&id) {
+                let new_id = id + 1;
+
+                // Rebuild the patient -> prescription index for this record.
+                let index_key = DataKey::PatientPrescriptions(record.patient_id.clone());
+                let mut ids: Vec<u64> = env
+                    .storage()
+                    .persistent()
+                    .get(&index_key)
+                    .unwrap_or(Vec::new(&env));
+                ids.push_back(new_id);
+                env.storage().persistent().set(&index_key, &ids);
+                extend_persistent_ttl(&env, &index_key);
+
+                put_prescription(&env, new_id, &record);
+                env.storage().persistent().remove(&id);
+                migrated += 1;
+            }
+            id += 1;
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PrescriptionCounter, &legacy_count);
+        env.storage().instance().remove(&legacy_symbol);
+
+        Ok(migrated)
+    }
+
     /// Create a reusable prescription template owned by the calling provider.
     /// Returns the new template_id.
+    ///
+    /// Fails closed: the provider-registry must be configured (see
+    /// `initialize`) and must recognize `provider`, otherwise
+    /// `NotInitialized` / `ProviderNotRegistered` is returned.
     pub fn create_template(
         env: Env,
         provider: Address,
         template: PrescriptionTemplate,
     ) -> Result<u64, Error> {
         provider.require_auth();
+
+        // #953: a template must not persist an allergy bypass — it would silently
+        // wave through every future issue without any per-issue admin approval.
+        if template.bypass_allergy_check {
+            return Err(Error::AllergyBypassRequiresAdmin);
+        }
 
         if let Some(registry_addr) = env
             .storage()
@@ -603,9 +869,10 @@ impl PrescriptionContract {
             schedule: template.schedule,
             substitution_allowed: template.substitution_allowed,
             pharmacy_id: template.pharmacy_id,
-            bypass_allergy_check: template.bypass_allergy_check,
+            // #953: never persist a bypass on a template.
+            bypass_allergy_check: false,
             dea_number: template.dea_number,
-            bypass_reason_hash: template.bypass_reason_hash,
+            bypass_reason_hash: None,
         };
 
         env.storage()
@@ -653,9 +920,11 @@ impl PrescriptionContract {
             valid_until,
             substitution_allowed: template.substitution_allowed,
             pharmacy_id: template.pharmacy_id,
-            bypass_allergy_check: template.bypass_allergy_check,
+            // #953: a stored template can never carry an allergy bypass; each
+            // issue must request admin approval explicitly.
+            bypass_allergy_check: false,
             dea_number: template.dea_number,
-            bypass_reason_hash: template.bypass_reason_hash,
+            bypass_reason_hash: None,
         };
 
         do_issue_prescription(&env, provider, patient, req)
@@ -668,11 +937,8 @@ impl PrescriptionContract {
     ) -> Result<(), Error> {
         pharmacy_id.require_auth();
 
-        let mut p: Prescription = env
-            .storage()
-            .persistent()
-            .get(&req.prescription_id)
-            .ok_or(Error::NotFound)?;
+        let mut p: Prescription =
+            get_prescription(&env, req.prescription_id).ok_or(Error::NotFound)?;
 
         // Validate prescription is in dispensible state
         if !matches!(
@@ -728,7 +994,7 @@ impl PrescriptionContract {
             p.status = PrescriptionStatus::PartiallyDispensed;
         }
 
-        env.storage().persistent().set(&req.prescription_id, &p);
+        put_prescription(&env, req.prescription_id, &p);
 
         // Emit dispense event — quantity omitted to prevent clinical PII exposure on-chain (#227)
         env.events().publish(
@@ -746,11 +1012,8 @@ impl PrescriptionContract {
     ) -> Result<(), Error> {
         from_pharmacy.require_auth();
 
-        let mut p: Prescription = env
-            .storage()
-            .persistent()
-            .get(&req.prescription_id)
-            .ok_or(Error::NotFound)?;
+        let mut p: Prescription =
+            get_prescription(&env, req.prescription_id).ok_or(Error::NotFound)?;
 
         // Validate transfer reason
         if is_blank(&req.transfer_reason) {
@@ -810,7 +1073,7 @@ impl PrescriptionContract {
         p.current_pharmacy = Some(req.to_pharmacy.clone());
         p.status = PrescriptionStatus::Transferred;
 
-        env.storage().persistent().set(&req.prescription_id, &p);
+        put_prescription(&env, req.prescription_id, &p);
 
         // Emit transfer event — transfer_reason omitted to avoid free-text PII on-chain (#227)
         env.events().publish(
@@ -828,11 +1091,8 @@ impl PrescriptionContract {
     ) -> Result<(), Error> {
         pharmacy_id.require_auth();
 
-        let mut p: Prescription = env
-            .storage()
-            .persistent()
-            .get(&prescription_id)
-            .ok_or(Error::NotFound)?;
+        let mut p: Prescription =
+            get_prescription(&env, prescription_id).ok_or(Error::NotFound)?;
 
         // Verify pharmacy is the destination
         if let Some(ref current_pharmacy) = p.current_pharmacy {
@@ -850,7 +1110,7 @@ impl PrescriptionContract {
 
         // Accept transfer and activate prescription
         p.status = PrescriptionStatus::Active;
-        env.storage().persistent().set(&prescription_id, &p);
+        put_prescription(&env, prescription_id, &p);
 
         // Emit acceptance event
         env.events().publish(
@@ -1350,11 +1610,8 @@ impl PrescriptionContract {
         pharmacy_id.require_auth();
         provider_id.require_auth();
 
-        let mut p: Prescription = env
-            .storage()
-            .persistent()
-            .get(&prescription_id)
-            .ok_or(Error::NotFound)?;
+        let mut p: Prescription =
+            get_prescription(&env, prescription_id).ok_or(Error::NotFound)?;
 
         // Validate prescription allows refills
         if p.refills_allowed == 0 {
@@ -1417,7 +1674,7 @@ impl PrescriptionContract {
             p.valid_until = new_valid_until;
         }
 
-        env.storage().persistent().set(&prescription_id, &p);
+        put_prescription(&env, prescription_id, &p);
 
         // Emit refill event — refills_remaining omitted to avoid clinical detail on-chain (#227)
         env.events().publish(
@@ -1436,11 +1693,8 @@ impl PrescriptionContract {
     ) -> Result<(), Error> {
         provider_id.require_auth();
 
-        let mut p: Prescription = env
-            .storage()
-            .persistent()
-            .get(&prescription_id)
-            .ok_or(Error::NotFound)?;
+        let mut p: Prescription =
+            get_prescription(&env, prescription_id).ok_or(Error::NotFound)?;
 
         // Validate provider authorization
         if p.provider_id != provider_id {
@@ -1467,7 +1721,7 @@ impl PrescriptionContract {
         }
 
         p.status = PrescriptionStatus::Cancelled;
-        env.storage().persistent().set(&prescription_id, &p);
+        put_prescription(&env, prescription_id, &p);
 
         // Emit cancellation event — reason omitted to avoid free-text PII on-chain (#227)
         env.events().publish(
@@ -1493,11 +1747,8 @@ impl PrescriptionContract {
             return Err(Error::MissingRecallReason);
         }
 
-        let mut p: Prescription = env
-            .storage()
-            .persistent()
-            .get(&prescription_id)
-            .ok_or(Error::NotFound)?;
+        let mut p: Prescription =
+            get_prescription(&env, prescription_id).ok_or(Error::NotFound)?;
 
         // Validate provider authorization
         if p.provider_id != provider_id {
@@ -1556,7 +1807,7 @@ impl PrescriptionContract {
 
         // Update prescription status to Recalled
         p.status = PrescriptionStatus::Recalled;
-        env.storage().persistent().set(&prescription_id, &p);
+        put_prescription(&env, prescription_id, &p);
 
         // Emit recall event — clinical_justification omitted to avoid PII on-chain (#227)
         env.events().publish(
@@ -1625,6 +1876,52 @@ impl PrescriptionContract {
         let nonce_key = DataKey::CallerNonce(caller);
         env.storage().persistent().get(&nonce_key).unwrap_or(0)
     }
+
+    /// One-off migration: re-key existing prescription records from the legacy
+    /// raw `u64` key (`0, 1, 2, …`) to the namespaced `DataKey::Prescription(id)`
+    /// key introduced by issue #956.
+    ///
+    /// Call this once after upgrading the contract WASM. Pass the first legacy
+    /// ID (inclusive) and the exclusive upper bound (the value the old `RxCounter`
+    /// held before the upgrade — i.e., the next ID that *would* have been issued).
+    ///
+    /// Safe to call multiple times: IDs that are already stored under the new
+    /// key, or that have no record under the old key, are silently skipped.
+    /// Requires admin authorization.
+    pub fn migrate_rx_keys(
+        env: Env,
+        admin: Address,
+        from_id: u64,
+        exclusive_upper: u64,
+    ) -> Result<u32, Error> {
+        admin.require_auth();
+        let configured: Option<Address> = env.storage().persistent().get(&DataKey::Admin);
+        if configured.as_ref().map_or(true, |a| *a != admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut migrated: u32 = 0;
+        let mut id = from_id;
+        while id < exclusive_upper {
+            // Skip if already under the new key
+            let new_key = DataKey::Prescription(id);
+            if !env.storage().persistent().has(&new_key) {
+                // Try to read from the legacy raw-u64 key
+                if let Some(prescription) = env
+                    .storage()
+                    .persistent()
+                    .get::<u64, Prescription>(&id)
+                {
+                    env.storage().persistent().set(&new_key, &prescription);
+                    extend_critical_ttl(&env, &new_key);
+                    migrated += 1;
+                }
+            }
+            id += 1;
+        }
+
+        Ok(migrated)
+    }
 }
 
 /// Inner implementation shared by `issue_prescription` and `issue_from_template`.
@@ -1636,24 +1933,28 @@ fn do_issue_prescription(
     patient_id: Address,
     req: IssueRequest,
 ) -> Result<u64, Error> {
-    // ── #481: bypass_allergy_check requires a non-empty reason hash ───────────
+    // ── #481/#953: bypass_allergy_check requires a non-zero reason hash and a
+    // second admin authorization ─────────────────────────────────────────────
     if req.bypass_allergy_check {
-        if req.bypass_reason_hash.is_none() {
+        let reason_hash = match req.bypass_reason_hash.clone() {
+            Some(hash) => hash,
+            None => return Err(Error::MissingOverrideReason),
+        };
+        if reason_hash == BytesN::from_array(env, &[0u8; 32]) {
             return Err(Error::MissingOverrideReason);
         }
+        // The prescriber cannot unilaterally waive a documented allergy: the
+        // configured admin must co-sign the transaction (#953).
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(Error::AllergyBypassRequiresAdmin)?;
+        admin.require_auth();
     }
 
-    // ── Provider registration check ───────────────────────────────────────────
-    if let Some(registry_addr) = env
-        .storage()
-        .persistent()
-        .get::<_, Address>(&DataKey::ProviderRegistry)
-    {
-        let client = ProviderRegistryClient::new(env, &registry_addr);
-        if !client.is_provider(&provider_id) {
-            return Err(Error::ProviderNotRegistered);
-        }
-    }
+    // ── Provider registration check (fail-closed) ─────────────────────────────
+    require_registered_provider(env, &provider_id)?;
 
     // ── Validity window ───────────────────────────────────────────────────────
     temporal::must_be_future(env, req.valid_until)
@@ -1667,24 +1968,14 @@ fn do_issue_prescription(
 
     // ── DEA validation for scheduled controlled substances ────────────────────
     if req.is_controlled {
-        match req.schedule {
-            Some(_schedule) => {
-                match &req.dea_number {
-                    Some(dea) => {
-                        if dea.len() != 9u32 {
-                            return Err(Error::ControlledSubstanceViolation);
-                        }
-                        let mut buf = [0u8; 9];
-                        dea.copy_into_slice(&mut buf);
-                        if !validate_dea_number(&buf) {
-                            return Err(Error::ControlledSubstanceViolation);
-                        }
-                    }
-                    None => return Err(Error::ControlledSubstanceViolation),
-                }
-            }
-            None => return Err(Error::ControlledSubstanceViolation),
-        }
+        validate_controlled_substance(
+            env,
+            &provider_id,
+            req.schedule,
+            req.refills_allowed,
+            req.days_supply,
+            &req.dea_number,
+        )?;
     }
 
     // ── #478: cap concurrent active prescriptions per patient ─────────────────
@@ -1731,8 +2022,20 @@ fn do_issue_prescription(
             .unwrap_or(false);
 
         let allergy_client = AllergyManagementClient::new(env, &allergy_addr);
-        let interactions = allergy_client
-            .check_drug_allergy_interaction(&patient_id, &req.medication_name);
+        // The prescription contract authorizes as itself: `allergy-management`
+        // requires `requester.require_auth()` and the address must hold a read
+        // grant for the patient (#952).
+        let requester = env.current_contract_address();
+        let interactions = match allergy_client.try_check_drug_allergy_interaction(
+            &patient_id,
+            &requester,
+            &req.medication_name,
+        ) {
+            Ok(Ok(interactions)) => interactions,
+            // Fail closed: a missing, archived or incompatible allergy registry
+            // must never let an unchecked prescription through (#952).
+            _ => return Err(Error::AllergyCheckUnavailable),
+        };
 
         if !interactions.is_empty() {
             if req.bypass_allergy_check {
@@ -1756,20 +2059,17 @@ fn do_issue_prescription(
     }
 
     // ── Assign prescription ID and store ─────────────────────────────────────
-    let prescription_id = env
+    // Prescription ids start at 1: the counter holds the last assigned id (0
+    // when unset), so `0` keeps meaning "no prescription" for callers.
+    let last_id: u64 = env
         .storage()
         .instance()
-        .get::<_, u64>(&DataKey::TemplateCounter) // reuse instance counter slot
+        .get(&DataKey::PrescriptionCounter)
         .unwrap_or(0);
-    // Use a dedicated prescription counter separate from template counter
-    let rx_id: u64 = env
-        .storage()
-        .instance()
-        .get::<_, u64>(&Symbol::new(env, "RxCounter"))
-        .unwrap_or(0);
+    let prescription_id = last_id.checked_add(1).ok_or(Error::TimestampOverflow)?;
     env.storage()
         .instance()
-        .set(&Symbol::new(env, "RxCounter"), &(rx_id + 1));
+        .set(&DataKey::PrescriptionCounter, &prescription_id);
 
     let prescription = Prescription {
         provider_id: provider_id.clone(),
@@ -1792,15 +2092,15 @@ fn do_issue_prescription(
         transfer_history: Vec::new(env),
     };
 
-    env.storage().persistent().set(&rx_id, &prescription);
-    add_patient_prescription(env, &patient_id, rx_id);
+    put_prescription(env, prescription_id, &prescription);
+    add_patient_prescription(env, &patient_id, prescription_id);
 
     env.events().publish(
         (Symbol::new(env, "prescription_issued"),),
-        (rx_id, provider_id, patient_id),
+        (prescription_id, provider_id, patient_id),
     );
 
-    Ok(rx_id)
+    Ok(prescription_id)
 }
 
 /// Authorization gate for PHI reads that expose patient allergy/condition data
@@ -1812,11 +2112,11 @@ fn do_issue_prescription(
 /// mirroring the check `do_issue_prescription` already performs for
 /// `issue_prescription`.
 ///
-/// Unlike `do_issue_prescription` (which treats an unconfigured registry as
-/// "skip the check"), this fails *closed*: if no provider-registry is
-/// configured, only the patient themself may read their own PHI. That's
-/// intentional — this gate exists specifically to close a PHI leak, so an
-/// unconfigured registry must not silently reopen it.
+/// Unlike `require_registered_provider` (which rejects requests outright when
+/// no registry is configured), this gate allows the patient themself to read
+/// their own PHI even without a registry. That's intentional — this gate
+/// exists specifically to close a PHI leak, so an unconfigured registry must
+/// not silently reopen it.
 fn require_phi_access(env: &Env, requester: &Address, patient_id: &Address) -> Result<(), Error> {
     if requester == patient_id {
         return Ok(());
@@ -1834,6 +2134,38 @@ fn require_phi_access(env: &Env, requester: &Address, patient_id: &Address) -> R
     }
 
     Err(Error::Unauthorized)
+}
+
+/// Fail-closed provider-registry check: the provider-registry must be
+/// configured *and* must recognize `provider` as a registered provider.
+/// An unconfigured registry is an error (`NotInitialized`) rather than a free
+/// pass, so nobody can prescribe before the registry is set up (#954).
+fn require_registered_provider(env: &Env, provider: &Address) -> Result<(), Error> {
+    let registry_addr: Address = env
+        .storage()
+        .persistent()
+        .get(&DataKey::ProviderRegistry)
+        .ok_or(Error::NotInitialized)?;
+    let client = ProviderRegistryClient::new(env, &registry_addr);
+    if !client.is_provider(provider) {
+        return Err(Error::ProviderNotRegistered);
+    }
+    Ok(())
+}
+
+/// Require `admin` to have authorized this call and to match the admin recorded
+/// by `initialize`.
+fn require_admin(env: &Env, admin: &Address) -> Result<(), Error> {
+    admin.require_auth();
+    let configured: Address = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Admin)
+        .ok_or(Error::NotInitialized)?;
+    if configured != *admin {
+        return Err(Error::Unauthorized);
+    }
+    Ok(())
 }
 
 fn is_registry_governed(env: &Env) -> bool {

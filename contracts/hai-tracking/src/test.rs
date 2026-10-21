@@ -317,45 +317,123 @@ fn test_hand_hygiene_validation() {
 }
 
 #[test]
-fn test_alert_infection_control_team_requires_auth() {
+fn test_alert_infection_control_team() {
     let (env, client) = setup();
     let facility = Address::generate(&env);
-    let reported_by = Address::generate(&env);
 
     client.alert_infection_control_team(
-        &facility,
         &Symbol::new(&env, "critical"),
+        &facility,
         &String::from_str(&env, "Suspected outbreak in ICU"),
-        &reported_by,
+        &Symbol::new(&env, "high"),
     );
-
-    let auths = env.auths();
-    assert_eq!(auths.len(), 1);
-    assert_eq!(auths.get(0).unwrap().0, reported_by);
 }
 
 #[test]
-fn test_alert_infection_control_team_without_auth_fails() {
-    let env = Env::default();
-    env.ledger().with_mut(|l| {
-        l.timestamp = 1_800_000_000;
-        l.sequence_number = 100;
-    });
+fn test_alert_infection_control_team_invalid_priority_fails() {
+    let (env, client) = setup();
+    let facility = Address::generate(&env);
 
+    let res = client.try_alert_infection_control_team(
+        &Symbol::new(&env, "critical"),
+        &facility,
+        &String::from_str(&env, "Suspected outbreak in ICU"),
+        &Symbol::new(&env, "urgent"),
+    );
+
+    assert!(res.is_err());
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_report_infection_requires_auth() {
+    let env = Env::default();
+    let contract_id = env.register(HAITrackingContract, ());
+    let client = HAITrackingContractClient::new(&env, &contract_id);
+
+    let patient = Address::generate(&env);
+    let facility = Address::generate(&env);
+    let reporter = Address::generate(&env);
+
+    client.report_infection(
+        &patient,
+        &facility,
+        &Symbol::new(&env, "clabsi"),
+        &1_799_900_000,
+        &String::from_str(&env, "ICU"),
+        &false,
+        &None,
+        &reporter,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_identify_outbreak_cluster_requires_auth() {
+    let env = Env::default();
     let contract_id = env.register(HAITrackingContract, ());
     let client = HAITrackingContractClient::new(&env, &contract_id);
 
     let facility = Address::generate(&env);
-    let reported_by = Address::generate(&env);
 
-    let res = client.try_alert_infection_control_team(
+    client.identify_outbreak_cluster(
+        &Symbol::new(&env, "mrsa"),
         &facility,
-        &Symbol::new(&env, "critical"),
-        &String::from_str(&env, "Suspected outbreak in ICU"),
-        &reported_by,
+        &String::from_str(&env, "Ward A"),
+        &30,
+        &3,
     );
+}
 
-    assert!(res.is_err());
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_track_isolation_precaution_requires_auth() {
+    let env = Env::default();
+    let contract_id = env.register(HAITrackingContract, ());
+    let client = HAITrackingContractClient::new(&env, &contract_id);
+
+    let patient = Address::generate(&env);
+    let indicated_by = Address::generate(&env);
+
+    client.track_isolation_precaution(
+        &patient,
+        &Symbol::new(&env, "contact"),
+        &1_799_990_000,
+        &String::from_str(&env, "MRSA colonization"),
+        &String::from_str(&env, "3 negative cultures"),
+        &indicated_by,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_record_patient_days_requires_auth() {
+    let env = Env::default();
+    let contract_id = env.register(HAITrackingContract, ());
+    let client = HAITrackingContractClient::new(&env, &contract_id);
+
+    let recorder = Address::generate(&env);
+
+    client.record_patient_days(&1, &100, &recorder);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_configure_ward_rate_requires_auth() {
+    let env = Env::default();
+    let contract_id = env.register(HAITrackingContract, ());
+    let client = HAITrackingContractClient::new(&env, &contract_id);
+
+    let facility = Address::generate(&env);
+
+    client.configure_ward_rate(
+        &facility,
+        &String::from_str(&env, "Ward A"),
+        &Symbol::new(&env, "mrsa"),
+        &7,
+        &200,
+        &100,
+    );
 }
 
 #[test]
@@ -377,6 +455,7 @@ fn test_calculate_infection_rate() {
             &reporter,
         );
         assert!(infection_id > 0);
+        client.record_patient_days(&infection_id, &100, &reporter);
     }
 
     let rate = client.calculate_infection_rate(
@@ -384,7 +463,10 @@ fn test_calculate_infection_rate() {
         &Symbol::new(&env, "clabsi"),
         &1_799_000_000,
         &1_800_000_000,
-        &1000,
+        &None,
     );
-    assert!(rate >= 0);
+
+    assert_eq!(rate.numerator, 2);
+    assert_eq!(rate.denominator, 200);
+    assert!(rate.rate_per_1000_days_x100 > 0);
 }
