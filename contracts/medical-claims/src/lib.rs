@@ -79,18 +79,16 @@ impl MedicalClaimsSystem {
     ///
     /// `insurer_registry_id` is the address of the deployed insurer-registry
     /// contract used to verify insurer credentials before claim submission (#527).
-    pub fn initialize(
+    /// Runs atomically as part of contract creation and cannot be called again,
+    /// so an attacker cannot front-run deployment and elect themselves admin.
+    pub fn __constructor(
         env: Env,
         admin: Address,
         access_control_id: Address,
         financial_records_id: Address,
         reconciliation_threshold: u64,
         insurer_registry_id: Address,
-    ) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
-        }
-        admin.require_auth();
+    ) {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
             .instance()
@@ -104,7 +102,6 @@ impl MedicalClaimsSystem {
         env.storage()
             .instance()
             .set(&DataKey::InsurerRegistryId, &insurer_registry_id);
-        Ok(())
     }
 
     /// Admin-only: authorize an insurer address to adjudicate and pay claims.

@@ -40,14 +40,11 @@ pub struct MedicalDeviceRegistry;
 #[contractimpl]
 impl MedicalDeviceRegistry {
     /// Configure the regulator address allowed to issue emergency recalls.
-    pub fn initialize(env: Env, regulator: Address) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Regulator) {
-            return Err(Error::AlreadyInitialized);
-        }
-
-        regulator.require_auth();
+    ///
+    /// Runs atomically as part of contract creation and cannot be called again,
+    /// so an attacker cannot front-run deployment and choose the regulator.
+    pub fn __constructor(env: Env, regulator: Address) {
         env.storage().instance().set(&DataKey::Regulator, &regulator);
-        Ok(())
     }
 
     /// Register a medical device with its Unique Device Identifier (UDI).

@@ -125,7 +125,6 @@ pub enum Error {
     ProviderNotRegistered = 8,
     VersionNotFound = 9,
     StaleNonce = 10,
-    AlreadyInitialized = 11,
 }
 
 #[soroban_sdk::contractclient(name = "ProviderRegistryClient")]
@@ -206,22 +205,17 @@ pub struct HealthRecords;
 
 #[contractimpl]
 impl HealthRecords {
-    /// Initialize the contract with an admin and the provider registry address.
+    /// Bind the contract to an admin and the provider registry address.
     ///
-    /// `admin` must authorize this call, preventing an unauthorized caller
-    /// from front-running deployment and pointing `provider_registry` at a
-    /// malicious contract. Fails with `Error::AlreadyInitialized` if called
-    /// more than once.
-    pub fn initialize(env: Env, admin: Address, provider_registry: Address) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::ProviderRegistry) {
-            return Err(Error::AlreadyInitialized);
-        }
-        validate_nonzero_address(&admin).map_err(|_| Error::InvalidAddress)?;
-        validate_nonzero_address(&provider_registry).map_err(|_| Error::InvalidAddress)?;
-        admin.require_auth();
+    /// This runs atomically as part of contract creation and cannot be called
+    /// again, so an attacker cannot front-run deployment and point
+    /// `provider_registry` at a malicious contract.
+    pub fn __constructor(env: Env, admin: Address, provider_registry: Address) {
+        validate_nonzero_address(&admin).expect("admin address must not be zero");
+        validate_nonzero_address(&provider_registry)
+            .expect("provider registry address must not be zero");
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::ProviderRegistry, &provider_registry);
-        Ok(())
     }
 
     /// Patient grants a provider scoped consent to act on their records.

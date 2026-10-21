@@ -68,13 +68,12 @@ fn share_value(shares:i128,value:i128,total:i128)->Result<i128,Error>{
 pub struct ScholarshipFundContract;
 #[contractimpl]
 impl ScholarshipFundContract{
-    pub fn initialize(env:Env,admin:Address,token:Address)->Result<(),Error>{
-        admin.require_auth();
-        if env.storage().instance().has(&DataKey::Admin){return Err(Error::AlreadyInitialized);}
+    /// Runs atomically as part of contract creation, so the deployer binds the
+    /// admin and token addresses and no front-running `initialize` call is possible.
+    pub fn __constructor(env:Env,admin:Address,token:Address){
         env.storage().instance().set(&DataKey::Admin,&admin);
         env.storage().instance().set(&DataKey::Token,&token);
         env.storage().instance().set(&DataKey::PoolBalance,&0i128);
-        Ok(())
     }
     /// Deposit tokens into the pool in exchange for pro-rata shares of the uncommitted pool.
     pub fn deposit(env:Env,depositor:Address,amount:i128)->Result<(),Error>{
