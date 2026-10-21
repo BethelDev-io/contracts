@@ -160,8 +160,10 @@ pub struct AllergyTrackingContract;
 #[contractimpl]
 impl AllergyTrackingContract {
     /// Configure contract admin used for privileged read options.
-    pub fn initialize(env: Env, admin: Address) {
-        admin.require_auth();
+    ///
+    /// Runs atomically as part of contract creation and cannot be called again,
+    /// so an attacker cannot front-run deployment and elect themselves admin.
+    pub fn __constructor(env: Env, admin: Address) {
         env.storage().instance().set(&DataKey::Admin, &admin);
     }
 

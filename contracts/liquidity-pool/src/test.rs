@@ -7,9 +7,8 @@ fn setup(env: &Env) -> (LiquidityPoolContractClient, Address, Address, Address) 
     let admin = Address::generate(env);
     let token_a = env.register_stellar_asset_contract(admin.clone());
     let token_b = env.register_stellar_asset_contract(admin.clone());
-    let contract_id = env.register_contract(None, LiquidityPoolContract);
+    let contract_id = env.register(LiquidityPoolContract, (&admin, &token_a, &token_b));
     let client = LiquidityPoolContractClient::new(env, &contract_id);
-    client.initialize(&admin, &token_a, &token_b);
     (client, admin, token_a, token_b)
 }
 

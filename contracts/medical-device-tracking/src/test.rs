@@ -9,11 +9,9 @@ fn dummy_hash(env: &Env) -> BytesN<32> {
 }
 
 fn setup_client(env: &Env) -> MedicalDeviceRegistryClient<'_> {
-    let contract_id = env.register(MedicalDeviceRegistry, ());
-    let client = MedicalDeviceRegistryClient::new(env, &contract_id);
     let regulator = Address::generate(env);
-    client.initialize(&regulator);
-    client
+    let contract_id = env.register(MedicalDeviceRegistry, (&regulator,));
+    MedicalDeviceRegistryClient::new(env, &contract_id)
 }
 
 fn register_device_helper(
@@ -211,7 +209,7 @@ fn test_record_device_maintenance_not_found() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register(MedicalDeviceRegistry, ());
+    let contract_id = env.register(MedicalDeviceRegistry, (&Address::generate(&env),));
     let client = MedicalDeviceRegistryClient::new(&env, &contract_id);
 
     let technician = Address::generate(&env);
@@ -411,10 +409,9 @@ fn test_notify_affected_patients_allows_configured_regulator() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register(MedicalDeviceRegistry, ());
-    let client = MedicalDeviceRegistryClient::new(&env, &contract_id);
     let regulator = Address::generate(&env);
-    client.initialize(&regulator);
+    let contract_id = env.register(MedicalDeviceRegistry, (&regulator,));
+    let client = MedicalDeviceRegistryClient::new(&env, &contract_id);
 
     let patient = Address::generate(&env);
     let provider = Address::generate(&env);
@@ -698,7 +695,7 @@ fn test_track_device_performance_not_found() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register(MedicalDeviceRegistry, ());
+    let contract_id = env.register(MedicalDeviceRegistry, (&Address::generate(&env),));
     let client = MedicalDeviceRegistryClient::new(&env, &contract_id);
 
     let patient_id = Address::generate(&env);
@@ -839,10 +836,9 @@ fn test_regulator_emergency_recall_records_scope() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register(MedicalDeviceRegistry, ());
-    let client = MedicalDeviceRegistryClient::new(&env, &contract_id);
     let regulator = Address::generate(&env);
-    client.initialize(&regulator);
+    let contract_id = env.register(MedicalDeviceRegistry, (&regulator,));
+    let client = MedicalDeviceRegistryClient::new(&env, &contract_id);
 
     let manufacturer_a = Address::generate(&env);
     let manufacturer_b = Address::generate(&env);
@@ -916,7 +912,7 @@ fn test_track_device_performance_patient_mismatch() {
 fn test_schedule_next_maintenance_requires_auth() {
     let env = Env::default();
     // env.mock_all_auths() is NOT called, so auth will fail
-    let contract_id = env.register(MedicalDeviceRegistry, ());
+    let contract_id = env.register(MedicalDeviceRegistry, (&Address::generate(&env),));
     let client = MedicalDeviceRegistryClient::new(&env, &contract_id);
 
     let manufacturer = Address::generate(&env);

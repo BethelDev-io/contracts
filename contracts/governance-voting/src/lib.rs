@@ -38,7 +38,6 @@ const BPS_DENOMINATOR: u32 = 10_000;
 #[repr(u32)]
 pub enum Error {
     NotInitialized    = 1,
-    AlreadyInitialized = 2,
     Unauthorized      = 3,
     ProposalNotFound  = 4,
     AlreadyVoted      = 5,
@@ -97,11 +96,9 @@ pub struct GovernanceVotingContract;
 
 #[contractimpl]
 impl GovernanceVotingContract {
-    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
-        }
-        admin.require_auth();
+    /// Runs atomically as part of contract creation, so the deployer binds the
+    /// admin address and no front-running `initialize` call is possible.
+    pub fn __constructor(env: Env, admin: Address) {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::NextId, &1u64);
         env.storage().instance().set(&DataKey::ProposalCount, &0u32);

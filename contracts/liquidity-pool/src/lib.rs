@@ -34,7 +34,6 @@ const POOL_FEE_BPS: i128 = 30; // 0.30%
 #[repr(u32)]
 pub enum Error {
     NotInitialized = 1,
-    AlreadyInitialized = 2,
     ZeroAmount = 3,
     InsufficientLiquidity = 4,
     SlippageExceeded = 5,
@@ -75,23 +74,20 @@ pub struct LiquidityPoolContract;
 
 #[contractimpl]
 impl LiquidityPoolContract {
-    pub fn initialize(
+    /// Runs atomically as part of contract creation, so the deployer binds the
+    /// admin and token addresses and no front-running `initialize` call is possible.
+    pub fn __constructor(
         env: Env,
         admin: Address,
         token_a: Address,
         token_b: Address,
-    ) -> Result<(), Error> {
-        admin.require_auth();
-        if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
-        }
+    ) {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::TokenA, &token_a);
         env.storage().instance().set(&DataKey::TokenB, &token_b);
         env.storage().instance().set(&DataKey::ReserveA, &0i128);
         env.storage().instance().set(&DataKey::ReserveB, &0i128);
         env.storage().instance().set(&DataKey::TotalShares, &0i128);
-        Ok(())
     }
 
     /// Deposit token_a and token_b amounts; mint LP shares proportionally.

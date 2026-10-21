@@ -191,10 +191,13 @@ pub struct UpgradeGovernance;
 
 #[contractimpl]
 impl UpgradeGovernance {
-    pub fn initialize(env: Env, signers: Vec<Address>, threshold: u32) -> Result<(), Error> {
-        Self::assert_not_initialized(&env)?;
+    /// Configure the set of upgrade signers and the approval threshold.
+    ///
+    /// Runs atomically as part of contract creation and cannot be called again,
+    /// so an attacker cannot front-run deployment with their own signer set.
+    pub fn __constructor(env: Env, signers: Vec<Address>, threshold: u32) {
         if threshold == 0 || threshold as usize > signers.len() as usize {
-            return Err(Error::InvalidThreshold);
+            panic!("invalid threshold");
         }
         env.storage().persistent().set(&DataKey::Signers, &signers);
         env.storage()
@@ -205,7 +208,6 @@ impl UpgradeGovernance {
         env.storage()
             .persistent()
             .set(&DataKey::SchemaVersion, &1u32);
-        Ok(())
     }
 
     pub fn propose_upgrade(

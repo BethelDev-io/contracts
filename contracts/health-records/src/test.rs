@@ -45,10 +45,9 @@ mod tests {
 
     fn setup(env: &Env) -> (HealthRecordsClient<'static>, Address, Address) {
         let mock_pr_id = env.register(crate::test::MockProviderRegistry, ());
-        let contract_id = env.register(HealthRecords, ());
-        let client = HealthRecordsClient::new(env, &contract_id);
         let admin = Address::generate(env);
-        client.initialize(&admin, &mock_pr_id);
+        let contract_id = env.register(HealthRecords, (&admin, &mock_pr_id));
+        let client = HealthRecordsClient::new(env, &contract_id);
         let patient = Address::generate(env);
         let provider = Address::generate(env);
         (client, patient, provider)
@@ -61,63 +60,6 @@ mod tests {
             can_share: true,
             expires_at: 0,
         }
-    }
-
-    #[test]
-    fn test_initialize_fails_without_admin_auth() {
-        // Regression test for #722: `initialize` must not be front-runnable.
-        // Here `attacker` signs the invocation instead of `admin`, so the
-        // contract's `admin.require_auth()` has no matching authorization
-        // and the call must fail rather than silently wiring up the
-        // attacker-controlled provider registry.
-        let env = Env::default();
-        let mock_pr_id = env.register(crate::test::MockProviderRegistry, ());
-        let contract_id = env.register(HealthRecords, ());
-        let client = HealthRecordsClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let attacker = Address::generate(&env);
-
-        let result = client
-            .mock_auths(&[MockAuth {
-                address: &attacker,
-                invoke: &MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "initialize",
-                    args: (&admin, &mock_pr_id).into_val(&env),
-                    sub_invokes: &[],
-                },
-            }])
-            .try_initialize(&admin, &mock_pr_id);
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_initialize_succeeds_with_admin_auth() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let mock_pr_id = env.register(crate::test::MockProviderRegistry, ());
-        let contract_id = env.register(HealthRecords, ());
-        let client = HealthRecordsClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.initialize(&admin, &mock_pr_id);
-    }
-
-    #[test]
-    fn test_double_initialize_fails() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let mock_pr_id = env.register(crate::test::MockProviderRegistry, ());
-        let contract_id = env.register(HealthRecords, ());
-        let client = HealthRecordsClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.initialize(&admin, &mock_pr_id);
-
-        let result = client.try_initialize(&admin, &mock_pr_id);
-        assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
     }
 
     #[test]
@@ -318,10 +260,9 @@ mod tests {
         let mock_pr_client = crate::test::MockProviderRegistryClient::new(&env, &mock_pr_id);
         mock_pr_client.set_is_provider(&false);
         
-        let contract_id = env.register(HealthRecords, ());
-        let client = HealthRecordsClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        client.initialize(&admin, &mock_pr_id);
+        let contract_id = env.register(HealthRecords, (&admin, &mock_pr_id));
+        let client = HealthRecordsClient::new(&env, &contract_id);
 
         let patient = Address::generate(&env);
         let provider = Address::generate(&env);
@@ -344,10 +285,9 @@ mod tests {
         let mock_pr_client = crate::test::MockProviderRegistryClient::new(&env, &mock_pr_id);
         mock_pr_client.set_is_provider(&false);
         
-        let contract_id = env.register(HealthRecords, ());
-        let client = HealthRecordsClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        client.initialize(&admin, &mock_pr_id);
+        let contract_id = env.register(HealthRecords, (&admin, &mock_pr_id));
+        let client = HealthRecordsClient::new(&env, &contract_id);
 
         let patient = Address::generate(&env);
         let provider = Address::generate(&env);
@@ -383,17 +323,16 @@ mod tests {
 
             let provider_registry_id = env.register(ProviderRegistry, ());
             let patient_registry_id = env.register(MedicalRegistry, ());
-            let hr_contract_id = env.register(HealthRecords, ());
+            let admin = Address::generate(&env);
+            let hr_contract_id = env.register(HealthRecords, (&admin, &provider_registry_id));
 
             let provider_client = ProviderRegistryClient::new(&env, &provider_registry_id);
             let patient_client = MedicalRegistryClient::new(&env, &patient_registry_id);
             let hr_client = HealthRecordsClient::new(&env, &hr_contract_id);
 
-            let admin = Address::generate(&env);
             let provider = Address::generate(&env);
             let patient = Address::generate(&env);
 
-            hr_client.initialize(&admin, &provider_registry_id);
             provider_client.initialize(&admin);
             provider_client.register_provider(
                 &admin,
@@ -460,7 +399,8 @@ mod tests {
 
             let provider_registry_id = env.register(ProviderRegistry, ());
             let patient_registry_id = env.register(MedicalRegistry, ());
-            let hr_contract_id = env.register(HealthRecords, ());
+            let admin = Address::generate(&env);
+            let hr_contract_id = env.register(HealthRecords, (&admin, &provider_registry_id));
 
             let provider_client = ProviderRegistryClient::new(&env, &provider_registry_id);
             let patient_client = MedicalRegistryClient::new(&env, &patient_registry_id);
@@ -468,9 +408,7 @@ mod tests {
 
             let provider = Address::generate(&env);
             let patient = Address::generate(&env);
-            let admin = Address::generate(&env);
 
-            hr_client.initialize(&admin, &provider_registry_id);
             provider_client.initialize(&admin);
             provider_client.register_provider(
                 &admin,
@@ -559,11 +497,10 @@ mod cross_contract_correlation_tests {
         MedicalRegistryClient<'static>,
     ) {
         let mock_pr_id = env.register(crate::test::MockProviderRegistry, ());
-        let hr_id = env.register(HealthRecords, ());
+        let admin = Address::generate(env);
+        let hr_id = env.register(HealthRecords, (&admin, &mock_pr_id));
         let pr_id = env.register(MedicalRegistry, ());
         let hr_client = HealthRecordsClient::new(env, &hr_id);
-        let admin = Address::generate(env);
-        hr_client.initialize(&admin, &mock_pr_id);
         (
             hr_client,
             MedicalRegistryClient::new(env, &pr_id),
@@ -701,10 +638,9 @@ mod batch_creation_tests {
 
     fn setup(env: &Env) -> (HealthRecordsClient<'static>, Address, Address) {
         let mock_pr_id = env.register(crate::test::MockProviderRegistry, ());
-        let contract_id = env.register(HealthRecords, ());
-        let client = HealthRecordsClient::new(env, &contract_id);
         let admin = Address::generate(env);
-        client.initialize(&admin, &mock_pr_id);
+        let contract_id = env.register(HealthRecords, (&admin, &mock_pr_id));
+        let client = HealthRecordsClient::new(env, &contract_id);
         let patient = Address::generate(env);
         let provider = Address::generate(env);
         (client, patient, provider)
@@ -972,10 +908,9 @@ mod consent_scope_tests {
 
     fn setup(env: &Env) -> (HealthRecordsClient<'static>, Address, Address) {
         let mock_pr_id = env.register(crate::test::MockProviderRegistry, ());
-        let contract_id = env.register(HealthRecords, ());
-        let client = HealthRecordsClient::new(env, &contract_id);
         let admin = Address::generate(env);
-        client.initialize(&admin, &mock_pr_id);
+        let contract_id = env.register(HealthRecords, (&admin, &mock_pr_id));
+        let client = HealthRecordsClient::new(env, &contract_id);
         let patient = Address::generate(env);
         let provider = Address::generate(env);
         (client, patient, provider)
